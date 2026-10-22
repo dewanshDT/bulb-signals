@@ -19,6 +19,7 @@ from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.widgets import Footer, Input, OptionList, RichLog, Static
 from textual.widgets.option_list import Option
 
@@ -311,6 +312,8 @@ class BulbTUI(App[int]):
                 self._connected = False
                 self.set_status("auth", "auth failed — check token")
                 return
+            except NoMatches:  # widgets torn down: the app is exiting
+                return
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # any network/parse failure means: reconnect
@@ -329,7 +332,10 @@ class BulbTUI(App[int]):
             return
         notes = self.state.get("notifications")
         self.state = st | {"notifications": notes}
-        self.render_all()
+        try:
+            self.render_all()
+        except NoMatches:
+            pass
 
     def _send(self, path: str, body: dict[str, Any], ok: str) -> None:
         async def go() -> None:
