@@ -32,7 +32,7 @@ jobs:
         run: sw_vers && /usr/bin/python3 --version && which -a python3
       - name: Sensor smoke on the system python
         run: /usr/bin/python3 tests/sensor_smoke.py
-      # Runners lack Full Disk Access, so this records where the real DB is and how the sensor reports it.
+      # Hosted runners can read the real DB (no TCC prompt), so this checks path, schema and decoding on current macOS.
       - name: Probe the real Notification Center DB
         run: |
           ls -la "$HOME/Library/Group Containers/group.com.apple.usernoted/db2" 2>&1 || true
