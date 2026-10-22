@@ -1,0 +1,200 @@
+# Bulb Signals: the signal language.
+#   colour = who/what, rhythm = urgency, bulbs = scope.
+#   one soft breath = FYI, two quick blinks = look when you can, repeating = act now.
+#   one bulb = personal/low-key, both = important, alternating = someone is calling you live.
+#
+# [pattern.<name>]
+#   description, priority (int or a contracts.PRIORITY key), swatch ("rrggbb"),
+#   repeat (int passes | "until_ack"), max_s (until_ack cap, default 30),
+#   quiet ("dim" clamp + single pass | "once" single pass, unclamped | "skip" not played),
+#   allow_fast (permit steps under the 300 ms floor), only_lit (skip bulbs whose base is off)
+#   steps = [{ bulbs = "all"|"desk"|"room"|[...], color = "rrggbb" | temp = K | off = true | base = true,
+#              bri = 10..100, ms = N, ramp = N }]
+#     bri omitted keeps the bulb's current brightness; a step with no look is a pause.
+#     ms = 0 means "at the same instant as the next step" (used for alternating bulbs).
+#     base = true shows the bulb's resting state (base + active mode overlay).
+#     ramp = N spreads the step over N sub-steps of ms/N each, from the current state to the target.
+# After every signal the engine restores each touched bulb to base + mode overlay.
+
+[pattern.dm]
+description = "Direct message: cyan double blink on the desk bulb"
+priority = "dm"
+swatch = "00e5ff"
+steps = [
+  { bulbs = "desk", color = "00e5ff", bri = 100, ms = 300 },
+  { bulbs = "desk", base = true, ms = 300 },
+  { bulbs = "desk", color = "00e5ff", bri = 100, ms = 300 },
+]
+
+[pattern.mention]
+description = "@mention: magenta double blink on both bulbs"
+priority = "mention"
+swatch = "ff00c8"
+steps = [
+  { bulbs = "all", color = "ff00c8", bri = 100, ms = 300 },
+  { bulbs = "all", base = true, ms = 300 },
+  { bulbs = "all", color = "ff00c8", bri = 100, ms = 300 },
+]
+
+[pattern.vip]
+description = "VIP: gold sparkle, three flickers then a slow fade home"
+priority = "vip"
+swatch = "ffc400"
+steps = [
+  { bulbs = "all", color = "ffc400", bri = 100, ms = 300 },
+  { bulbs = "all", bri = 30, ms = 300 },
+  { bulbs = "all", bri = 85, ms = 300 },
+  { bulbs = "all", bri = 15, ms = 300 },
+  { bulbs = "all", bri = 100, ms = 600 },
+  { bulbs = "all", base = true, ramp = 6, ms = 2400 },
+]
+
+[pattern.backlog]
+description = "Unread backlog: slow purple breath, then three tiny blinks (desk)"
+priority = 20
+swatch = "9b30ff"
+steps = [
+  { bulbs = "desk", color = "9b30ff", bri = 10, ms = 300 },
+  { bulbs = "desk", bri = 60, ramp = 3, ms = 1200 },
+  { bulbs = "desk", bri = 10, ramp = 3, ms = 1200 },
+  { bulbs = "desk", bri = 35, ms = 300 },
+  { bulbs = "desk", bri = 10, ms = 300 },
+  { bulbs = "desk", bri = 35, ms = 300 },
+  { bulbs = "desk", bri = 10, ms = 300 },
+  { bulbs = "desk", bri = 35, ms = 300 },
+  { bulbs = "desk", bri = 10, ms = 300 },
+]
+
+[pattern.ringing]
+description = "Call: purple ring-ring between the bulbs, pause, until answered (max 30 s)"
+priority = "ringing"
+swatch = "9b30ff"
+repeat = "until_ack"
+max_s = 30
+steps = [
+  { bulbs = "desk", color = "9b30ff", bri = 100, ms = 0 },
+  { bulbs = "room", base = true, ms = 300 },
+  { bulbs = "room", color = "9b30ff", bri = 100, ms = 0 },
+  { bulbs = "desk", base = true, ms = 300 },
+  { bulbs = "desk", color = "9b30ff", bri = 100, ms = 0 },
+  { bulbs = "room", base = true, ms = 300 },
+  { bulbs = "room", color = "9b30ff", bri = 100, ms = 0 },
+  { bulbs = "desk", base = true, ms = 300 },
+  { bulbs = "all", base = true, ms = 1500 },
+]
+
+# Ambient drift: the room quietly turns towards daylight and back, ~90 s in total.
+# A held cooler state would fight restore semantics (and outlive a cancelled meeting),
+# so the drift is a there-and-back ramp; the engine's final restore is then a no-op.
+[pattern.meeting_t10]
+description = "Meeting in 10 min: both bulbs drift slowly towards daylight and back"
+priority = "ambient"
+swatch = "dbe6ff"
+only_lit = true
+steps = [
+  { bulbs = "all", temp = 5600, ramp = 20, ms = 60000 },
+  { bulbs = "all", base = true, ramp = 10, ms = 30000 },
+]
+
+[pattern.meeting_t5]
+description = "Meeting in 5 min: one warm amber breath on both bulbs"
+priority = 40
+swatch = "ffa000"
+steps = [
+  { bulbs = "all", color = "ffa000", bri = 10, ms = 300 },
+  { bulbs = "all", bri = 80, ramp = 4, ms = 1600 },
+  { bulbs = "all", bri = 10, ramp = 4, ms = 1600 },
+]
+
+[pattern.meeting_t2]
+description = "Meeting in 2 min: two amber pulses on both bulbs"
+priority = 55
+swatch = "ff8c00"
+steps = [
+  { bulbs = "all", color = "ff8c00", bri = 30, ms = 300 },
+  { bulbs = "all", bri = 100, ms = 300 },
+  { bulbs = "all", bri = 30, ms = 300 },
+  { bulbs = "all", base = true, ms = 600 },
+  { bulbs = "all", color = "ff8c00", bri = 30, ms = 300 },
+  { bulbs = "all", bri = 100, ms = 300 },
+  { bulbs = "all", bri = 30, ms = 300 },
+]
+
+[pattern.meeting_t1]
+description = "Meeting in 1 min: orange alternating between the bulbs, three times"
+priority = 75
+swatch = "ff5a00"
+repeat = 3
+steps = [
+  { bulbs = "desk", color = "ff5a00", bri = 100, ms = 0 },
+  { bulbs = "room", base = true, ms = 400 },
+  { bulbs = "room", color = "ff5a00", bri = 100, ms = 0 },
+  { bulbs = "desk", base = true, ms = 400 },
+]
+
+# Heartbeat is the one pattern that opts into sub-300 ms steps: lub-dub needs the snap.
+[pattern.meeting_t0]
+description = "Meeting now: red heartbeat on both bulbs until acknowledged (max 60 s)"
+priority = "meeting_t0"
+swatch = "ff0000"
+repeat = "until_ack"
+max_s = 60
+allow_fast = true
+steps = [
+  { bulbs = "all", color = "ff0000", bri = 100, ms = 180 },
+  { bulbs = "all", bri = 20, ms = 180 },
+  { bulbs = "all", bri = 80, ms = 300 },
+  { bulbs = "all", bri = 10, ms = 1100 },
+]
+
+[pattern.meeting_overrun]
+description = "Meeting overrunning: a single short blink on the room bulb"
+priority = 40
+swatch = "ff3000"
+steps = [
+  { bulbs = "room", color = "ff3000", bri = 70, ms = 300 },
+]
+
+[pattern.incident]
+description = "Incident: red/white strobe, three times"
+priority = "incident"
+swatch = "ff0000"
+repeat = 3
+steps = [
+  { bulbs = "all", color = "ff0000", bri = 100, ms = 300 },
+  { bulbs = "all", temp = 6500, bri = 100, ms = 300 },
+]
+
+[pattern.success]
+description = "Success: one green breath on the desk bulb"
+priority = "default"
+swatch = "00e060"
+steps = [
+  { bulbs = "desk", color = "00e060", bri = 10, ms = 300 },
+  { bulbs = "desk", bri = 70, ramp = 3, ms = 1200 },
+  { bulbs = "desk", bri = 10, ramp = 3, ms = 1200 },
+]
+
+[pattern.heartbeat_lost]
+description = "A watched heartbeat went missing: one dim blue blink on the desk bulb"
+priority = 20
+swatch = "1e50ff"
+steps = [
+  { bulbs = "desk", color = "1e50ff", bri = 20, ms = 600 },
+]
+
+[pattern.test]
+description = "Test: green on the desk, then the room, then both"
+priority = "default"
+swatch = "00ff40"
+steps = [
+  { bulbs = "desk", color = "00ff40", bri = 60, ms = 600 },
+  { bulbs = "desk", base = true, ms = 0 },
+  { bulbs = "room", color = "00ff40", bri = 60, ms = 600 },
+  { bulbs = "room", base = true, ms = 300 },
+  { bulbs = "all", color = "00ff40", bri = 60, ms = 600 },
+]
+
+[mode.on_air]
+description = "On air: the room bulb holds a dim red"
+room = { color = "ff0000", bri = 10 }

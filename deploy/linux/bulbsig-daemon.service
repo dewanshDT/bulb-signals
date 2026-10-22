@@ -1,0 +1,51 @@
+# Bulb Signals daemon for a Linux VM/LXC on the bulbs' LAN.
+# Install (as root), replacing the placeholders:
+#   sed -e 's|__USER__|alice|g' -e 's|__HOME__|/home/alice|g' \
+#       -e 's|__REPO__|/home/alice/bulb-signals|g' -e 's|__PYTHON__|/home/alice/bulb-signals/.venv/bin/python|g' \
+#       bulbsig-daemon.service > /etc/systemd/system/bulbsig-daemon.service
+#   systemctl daemon-reload && systemctl enable --now bulbsig-daemon
+#   journalctl -u bulbsig-daemon -f
+# Set [daemon] listen = "0.0.0.0:8766" and a token in __HOME__/.config/bulbsig/config.toml
+# so the Mac sensor can reach it. Bridged (not NATed) networking is needed for UDP to the bulbs.
+
+[Unit]
+Description=Bulb Signals daemon (WiZ notification lights)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__REPO__
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=__REPO__
+ExecStart=__PYTHON__ -m bulbsig.cli daemon
+Restart=on-failure
+RestartSec=5
+
+# Hardening: read-only system and home except bulbsig's own dirs; IP sockets
+# (incl. UDP broadcast to the LAN) stay allowed, no capabilities are needed.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=-__HOME__/.config/bulbsig -__HOME__/.local/state/bulbsig -__HOME__/.cache/bulbsig
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

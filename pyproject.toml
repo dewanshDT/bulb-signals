@@ -1,0 +1,32 @@
+[project]
+name = "bulbsig"
+version = "0.1.0"
+description = "Turn notifications into colour/blink signals on WiZ bulbs"
+requires-python = ">=3.11"
+dependencies = [
+  "aiohttp>=3.9",
+  "textual>=0.80",
+  "icalendar>=6",
+  "recurring-ical-events>=3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+bulbsig = "bulbsig.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["bulbsig*"]
+
+[tool.setuptools.package-data]
+bulbsig = ["*.toml"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = ["hardware: talks to the real bulbs on the LAN (opt-in with --hardware)"]
