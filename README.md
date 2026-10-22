@@ -31,6 +31,9 @@ ip = "192.168.1.9"
 mac = "9877d5e910a8"
 ip = "192.168.1.14"
 
+[me]
+handles = ["Dewansh"]          # your Slack @handle(s); add "here", "channel" to count those
+
 [quiet]
 start = "23:00"
 end = "08:00"
@@ -101,8 +104,14 @@ LAN address and set a token. Point the Mac sensor at it with `[daemon] url`.
 - **Rules:** `bulbsig/rules_default.toml`, overridden with
   `rules_file = "..."`. The VIP list, the focus allow-list and the app aliases
   live there.
-- **Matching is guesswork until a real probe:** the Slack and Zen text
-  patterns were written before seeing real notifications from the Mac.
+- **Slack rules use the shapes seen on macOS 27.0.** The title is the
+  workspace. The subtitle is `#channel` or the DM sender. The body is
+  `Sender: text` in channels.
+  - Channel chatter, Sentry alerts and other people's mentions stay dark.
+  - Mentions of your `[me] handles`, DMs, huddle invites and Slackbot
+    reminders light up.
+  - Zen web pushes carry `via <site>` in the subtitle; meetings are matched
+    by site.
 
 ## Tests
 

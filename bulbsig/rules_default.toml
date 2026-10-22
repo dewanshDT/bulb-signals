@@ -1,43 +1,74 @@
 # bulbsig notification rules.
 #
-# UNVERIFIED: the exact macOS Notification Center text that Slack, Zen, Zoom,
-# Teams and calendar apps produce (which field holds the channel, sender,
-# meeting name) has not been confirmed against real records. These are
-# heuristics; run `bulbsig probe` on the Mac, then tune with
-#   bulbsig rules test --app com.tinyspeck.slackmacgap --title "..." --body "..."
+# Shapes observed on macOS 27.0 (Notification Center DB, 2026-10-22):
+#   Slack channel   title = workspace   subtitle = "#channel"   body = "Sender: text"
+#   Slack DM        title = workspace   subtitle = "Sender"     body = "text"
+#   Slack group DM  title = workspace   subtitle = "A, B"       body = "Sender: text"
+#   Zen web push    title = page title  subtitle = "via site"   body = text
+# Not yet seen for real: huddle invites, Google Calendar/Meet web pushes,
+# Zoom/Teams, calendar apps. Those rules are best guesses.
+#
+# Try a notification:  bulbsig rules test --app com.tinyspeck.slackmacgap --subtitle "#eng" --body "Sam: @you hi"
 #
 # Format
-#   [apps]   alias = ["bundle.id", "glob.*"]  (rules may use aliases or raw ids/globs)
-#   [vip]    names = [...]  title/subtitle containing a name -> signal "vip" (checked first)
+#   [apps]   alias = ["bundle.id", "glob.*"]   (rules may use aliases or raw ids/globs)
+#   [me]     handles = ["you"]   your @handles; "{me}" in any regex expands to them.
+#            config.toml [me] handles overrides this list. Add "here", "channel" to count those.
+#   [vip]    names = [...]   sender/title containing a name -> signal "vip" (checked first)
 #   [[rule]] evaluated in order, first match wins:
-#     name, apps, signal, key = "{app}:{title}" (str.format over notification fields), priority
-#     title | subtitle | body | head (title+subtitle) | any (all three) = "regex" (case-insensitive, all must match)
-#     not_<field> = "regex"  rule is skipped if it matches
-#     ignore = true          stop here with no signal (swallow the notification)
+#     name, apps, signal, key (str.format over notification fields + sender/channel), priority
+#     title | subtitle | body | head (title+subtitle) | any (all) | sender | channel = "regex"
+#       case-insensitive; all given must match
+#     not_<field> = "regex"   rule is skipped if it matches
+#     ignore = true           stop here with no signal
 #   [focus]  allow = signal names / globs that still fire while focus mode is on
 
 [apps]
 slack = ["com.tinyspeck.slackmacgap"]
 zen = ["app.zen-browser.zen"]
+notion = ["notion.id"]
 calendar = ["com.apple.iCal", "com.google.Calendar", "com.flexibits.fantastical*", "com.busymac.busycal*", "com.cron.electron"]
 zoom = ["us.zoom.xos"]
 teams = ["com.microsoft.teams", "com.microsoft.teams2"]
-meet = ["com.google.Chrome.app.kjgfgldnnfoeklkmfkjfagphfepbbdan"]
 github = ["com.github.GitHubClient", "com.github.*"]
 alerting = ["com.pagerduty.*", "com.opsgenie.*", "com.atlassian.opsgenie*"]
 
+[me]
+handles = []
+
 [vip]
 names = []
-# apps = ["slack"]   # optional: only these apps can trigger vip
+# apps = ["slack"]
 
 [focus]
 allow = ["ringing", "vip", "incident", "meeting_*", "heartbeat_lost"]
 
-# --- calls -----------------------------------------------------------------
+# --- noise -------------------------------------------------------------------
+[[rule]]
+name = "sentry"
+apps = ["slack"]
+body = '^Sentry:'
+ignore = true
+
+[[rule]]
+name = "sentry-channel"
+apps = ["slack"]
+channel = 'sentry'
+ignore = true
+
+# --- calls: only when aimed at you (DM-shaped), not huddles happening in channels
 [[rule]]
 name = "call"
-apps = ["slack", "zoom", "teams"]
-any = 'huddle|is calling|incoming call|invited you|calling you'
+apps = ["slack"]
+not_channel = '.'
+any = 'huddle|is calling|calling you|incoming call|wants to (huddle|call)'
+signal = "ringing"
+key = "call:{sender}"
+
+[[rule]]
+name = "call-app"
+apps = ["zoom", "teams"]
+any = 'is calling|calling you|incoming call|invited you'
 signal = "ringing"
 key = "call:{title}"
 
@@ -49,84 +80,92 @@ signal = "incident"
 key = "incident:{title}"
 
 [[rule]]
-name = "incident"
-apps = ["slack", "teams"]
-any = '#incident|#alerts?\b|\bsev ?[0-4]\b|\boutage\b|pagerduty|\bis down\b'
+name = "incident-channel"
+apps = ["slack"]
+channel = '^#(incident|inc-|alerts?\b|outage|on-?call)'
 signal = "incident"
-key = "incident:{title}"
+key = "incident:{channel}"
 
-# --- CI / GitHub ---------------------------------------------------------------
+# --- CI / GitHub (app or github.com web pushes; Slack channel CI bots stay quiet)
 [[rule]]
 name = "ci-failed"
-apps = ["github", "slack", "zen"]
-head = 'github|gitlab|actions|\bci\b|build|workflow|pipeline|buildkite|circleci|jenkins'
+apps = ["github", "zen"]
+head = 'github|^via github\.com'
 any = '\bfail(ed|ing|ure)\b'
 signal = "incident"
 key = "ci:{title}"
 
 [[rule]]
 name = "ci-success"
-apps = ["github", "slack", "zen"]
-head = 'github|gitlab|actions|\bci\b|build|workflow|pipeline|buildkite|circleci|jenkins'
+apps = ["github", "zen"]
+head = 'github|^via github\.com'
 any = '\b(passed|succeeded|successful|approved)\b'
 signal = "success"
 key = "ci:{title}"
 
-# --- meetings ------------------------------------------------------------------
+# --- meetings (the calendar ICS feed is the main source; these catch app/web pushes)
 [[rule]]
 name = "meeting-now"
-apps = ["calendar", "zoom", "teams", "meet"]
+apps = ["calendar", "zoom", "teams"]
 any = 'starting now|is starting|starts now|has started|\bnow\b'
 signal = "meeting_t0"
 key = "meeting:{title}"
 
 [[rule]]
+name = "meeting-soon-app"
+apps = ["calendar", "zoom", "teams"]
+signal = "meeting_t5"
+key = "meeting:{title}"
+
+[[rule]]
 name = "meeting-now-web"
-apps = ["zen", "slack"]
-any = '(meeting|standup|stand-up|sync|event|meet\.google|zoom\.us)[\s\S]*(starting now|is starting|starts now|has started|\bnow\b)|(starting now|is starting|starts now|has started|\bnow\b)[\s\S]*(meeting|standup|stand-up|sync|event|meet\.google|zoom\.us)'
+apps = ["zen"]
+subtitle = '^via (meet\.google\.com|calendar\.google\.com|[\w.]*zoom\.us|teams\.microsoft\.com|teams\.live\.com)'
+any = 'starting now|is starting|starts now|has started|\bnow\b|joined|is waiting'
 signal = "meeting_t0"
 key = "meeting:{title}"
 
 [[rule]]
-name = "meeting-soon-calendar"
-apps = ["calendar"]
-signal = "meeting_t5"
-key = "meeting:{title}"
-
-[[rule]]
-name = "meeting-soon"
-apps = ["zoom", "teams", "meet"]
-any = 'starts in|in \d+ ?min|reminder|meeting|meet\.google|zoom\.us'
-signal = "meeting_t5"
-key = "meeting:{title}"
-
-[[rule]]
 name = "meeting-soon-web"
-apps = ["zen", "slack"]
-any = '(starts|starting) in \d+|\bin \d+ ?min(ute)?s?\b|meet\.google\.com|zoom\.us/j|teams\.microsoft\.com/l/meetup|(meeting|event) reminder|reminder:[^\n]*(meeting|standup|sync|call)'
+apps = ["zen"]
+subtitle = '^via (meet\.google\.com|calendar\.google\.com|[\w.]*zoom\.us|teams\.microsoft\.com|teams\.live\.com)'
 signal = "meeting_t5"
 key = "meeting:{title}"
 
 # --- Slack messages ------------------------------------------------------------
-# Channel messages are assumed to carry "#channel" in the title or subtitle;
-# DMs carry only the sender's name.
 [[rule]]
 name = "slack-mention"
 apps = ["slack"]
-head = '#'
-body = '@|mentioned'
+channel = '.'
+body = '@({me})\b'
 signal = "mention"
-key = "mention:{title}"
+key = "mention:{channel}"
 
 [[rule]]
 name = "slack-channel"
 apps = ["slack"]
-head = '#'
+channel = '.'
 ignore = true
+
+[[rule]]
+name = "slack-reminder"
+apps = ["slack"]
+sender = '^slackbot$'
+body = '^reminder'
+signal = "dm"
+key = "reminder:{body}"
 
 [[rule]]
 name = "slack-dm"
 apps = ["slack"]
-not_head = '#'
+not_channel = '.'
 signal = "dm"
-key = "dm:{title}"
+key = "dm:{subtitle}"
+
+# --- Notion ---------------------------------------------------------------------
+[[rule]]
+name = "notion-mention"
+apps = ["notion"]
+any = 'mentioned you|@({me})\b'
+signal = "mention"
+key = "notion:{title}"

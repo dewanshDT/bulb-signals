@@ -322,12 +322,12 @@ def build_app(cfg: Any, engine: EngineAPI, rules: Any, calendar: Any = None, pat
 async def serve(cfg: Any) -> None:
     from . import engine as engine_mod, patterns as patterns_mod, wiz
     from .calendar_ics import CalendarWatcher
-    from .rules import Rules
+    from .rules import Rules, config_handles
 
     bulbs = await wiz.open_bulbs(cfg)
     pats = patterns_mod.load(cfg.patterns_file)
     engine = engine_mod.Engine(bulbs, pats, quiet=(cfg.quiet_start, cfg.quiet_end, cfg.quiet_max_bri))
-    rules = Rules.load(cfg.rules_file)
+    rules = Rules.load(cfg.rules_file, me=config_handles(cfg))
     calendar = None
     if cfg.ics_urls:
         until_ack = bool(cfg.raw.get("calendar", {}).get("on_air_until_ack", False))

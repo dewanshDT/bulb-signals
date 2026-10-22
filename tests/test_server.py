@@ -144,20 +144,20 @@ async def test_no_token_rules(rules):
 
 async def test_notify_matches_and_records(env):
     client, engine, _, _, d = env
-    st, out = await post(client, "/v1/notify", {"source": "mac", "app": SLACK, "title": "Frank", "body": "hi"})
+    st, out = await post(client, "/v1/notify", {"source": "mac", "app": SLACK, "title": "acme", "subtitle": "Frank", "body": "hi"})
     assert st == 200 and out == {"rule": "slack-dm", "signal": "dm", "job": "j1"}
     sig, key, prio, origin = engine.calls[0][1]
-    assert (sig, key, prio, origin["title"]) == ("dm", "dm:Frank", None, "Frank")
-    st, out = await post(client, "/v1/notify", {"source": "mac", "app": SLACK, "title": "#random", "body": "lol"})
+    assert (sig, key, prio, origin["subtitle"]) == ("dm", "dm:Frank", None, "Frank")
+    st, out = await post(client, "/v1/notify", {"source": "mac", "app": SLACK, "title": "acme", "subtitle": "#random", "body": "lol"})
     assert out == {"rule": None, "signal": None, "job": None}
-    assert len(d.recent) == 2 and d.recent[-1]["notification"]["title"] == "#random"
+    assert len(d.recent) == 2 and d.recent[-1]["notification"]["subtitle"] == "#random"
     assert (await post(client, "/v1/notify", ["x"]))[0] == 400
 
 
 async def test_notify_unknown_signal(env, rules):
     client, engine, *_ = env
-    rules.rules[0].signal = "nope"  # "call" rule
-    st, out = await post(client, "/v1/notify", {"source": "mac", "app": SLACK, "title": "A", "body": "huddle"})
+    next(r for r in rules.rules if r.name == "call").signal = "nope"
+    st, out = await post(client, "/v1/notify", {"source": "mac", "app": SLACK, "title": "acme", "subtitle": "A", "body": "huddle"})
     assert st == 200 and out["signal"] == "nope" and out["job"] is None and "unknown signal" in out["error"]
 
 
@@ -172,10 +172,10 @@ async def test_ring_buffer(env):
 async def test_focus_suppression_and_backlog(env):
     client, engine, _, _, d = env
     assert await post(client, "/v1/mode", {"mode": "focus", "active": True}) == (200, {})
-    _, out = await post(client, "/v1/notify", {"source": "m", "app": SLACK, "title": "Frank", "body": "hi"})
+    _, out = await post(client, "/v1/notify", {"source": "m", "app": SLACK, "title": "acme", "subtitle": "Frank", "body": "hi"})
     assert out["suppressed"] == "focus" and out["job"] is None
-    await post(client, "/v1/notify", {"source": "m", "app": SLACK, "title": "Gus", "body": "yo"})
-    _, out = await post(client, "/v1/notify", {"source": "m", "app": SLACK, "title": "#incident", "body": "db"})
+    await post(client, "/v1/notify", {"source": "m", "app": SLACK, "title": "acme", "subtitle": "Gus", "body": "yo"})
+    _, out = await post(client, "/v1/notify", {"source": "m", "app": SLACK, "title": "acme", "subtitle": "#incident", "body": "db"})
     assert out["job"]
     assert engine.triggered() == ["incident"]
     st = await (await client.get("/v1/state", headers=AUTH)).json()
@@ -256,13 +256,13 @@ async def test_sse(env):
             break
         await asyncio.sleep(0.01)
     engine.queues[0].put_nowait({"type": "signal_start", "job": "j9", "signal": "dm"})
-    await post(client, "/v1/notify", {"source": "m", "app": SLACK, "title": "Frank", "body": "hi"})
+    await post(client, "/v1/notify", {"source": "m", "app": SLACK, "title": "acme", "subtitle": "Frank", "body": "hi"})
     cal.publish({"type": "meeting", "phase": "t5", "title": "Standup"})
     evs = await read_events(resp, 4)
     kinds = [k for k, _ in evs if k != "comment"]
     assert kinds[:3] == ["signal_start", "notification", "meeting"]
     note = next(v for k, v in evs if k == "notification")
-    assert note["rule"] == "slack-dm" and note["job"] == "j1" and note["notification"]["title"] == "Frank"
+    assert note["rule"] == "slack-dm" and note["job"] == "j1" and note["notification"]["subtitle"] == "Frank"
     assert ("comment", ": keepalive") in await read_events(resp, 1)
     resp.close()
     for _ in range(100):

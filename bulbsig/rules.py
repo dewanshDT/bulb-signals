@@ -11,7 +11,8 @@ from typing import Any
 
 from .contracts import Notification
 
-FIELDS = ("title", "subtitle", "body", "head", "any")
+FIELDS = ("title", "subtitle", "body", "head", "any", "sender", "channel")
+NEVER = "(?!)"
 DEFAULT_KEY = "{app}:{title}"
 
 
@@ -42,12 +43,34 @@ class _Blank(dict):
         return ""
 
 
+_SENDER = re.compile(r"^([^:\n]{1,60}): ")
+
+
+def derived(n: Notification) -> dict[str, str]:
+    """Slack on macOS: title = workspace, subtitle = "#channel" or the DM sender,
+    body = "Sender: text" in channels. Web pushes: subtitle = "via <site>"."""
+    sub = n.subtitle.strip()
+    channel = sub if sub.startswith("#") else ""
+    if sub and not channel and not sub.startswith("via "):
+        sender = sub
+    else:
+        m = _SENDER.match(n.body)
+        sender = m.group(1) if m else ""
+    return {"sender": sender, "channel": channel}
+
+
 def _texts(n: Notification) -> dict[str, str]:
     return {
         "title": n.title, "subtitle": n.subtitle, "body": n.body,
         "head": f"{n.title}\n{n.subtitle}",
         "any": f"{n.title}\n{n.subtitle}\n{n.body}",
+        **derived(n),
     }
+
+
+def me_pattern(handles: list[str]) -> str:
+    hs = [re.escape(h.strip().lstrip("@")) for h in handles if h.strip().lstrip("@")]
+    return "|".join(hs) if hs else NEVER
 
 
 def _app_ok(app: str, pats: list[str]) -> bool:
@@ -64,9 +87,16 @@ class Rules:
         self.vip_apps = vip_apps or []
         self.focus_allow: set[str] = set(focus_allow or ())
         self.apps = apps or {}
+        self.me: list[str] = []
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "Rules":
+    def from_dict(cls, d: dict[str, Any], *, me: list[str] | None = None) -> "Rules":
+        handles = list(me) if me is not None else list(d.get("me", {}).get("handles", []))
+        me_re = me_pattern(handles)
+
+        def rx(src: str) -> re.Pattern[str]:
+            return re.compile(src.replace("{me}", me_re), re.I | re.S)
+
         aliases = {k: [v] if isinstance(v, str) else list(v) for k, v in d.get("apps", {}).items()}
 
         def expand(names: list[str] | str | None) -> list[str]:
@@ -82,21 +112,24 @@ class Rules:
                 name=r.get("name", f"rule{i}"),
                 signal=None if r.get("ignore") else r["signal"],
                 apps=expand(r.get("apps")),
-                match={f: re.compile(r[f], re.I | re.S) for f in FIELDS if f in r},
-                exclude={f: re.compile(r["not_" + f], re.I | re.S) for f in FIELDS if "not_" + f in r},
+                match={f: rx(r[f]) for f in FIELDS if f in r},
+                exclude={f: rx(r["not_" + f]) for f in FIELDS if "not_" + f in r},
                 key=r.get("key", DEFAULT_KEY),
                 priority=r.get("priority"),
             ))
         vip = d.get("vip", {})
-        return cls(rules, vip=list(vip.get("names", [])), vip_apps=expand(vip.get("apps")),
-                   focus_allow=set(d.get("focus", {}).get("allow", [])), apps=aliases)
+        out = cls(rules, vip=list(vip.get("names", [])), vip_apps=expand(vip.get("apps")),
+                  focus_allow=set(d.get("focus", {}).get("allow", [])), apps=aliases)
+        out.me = handles
+        return out
 
     @classmethod
-    def load(cls, path: str | Path) -> "Rules":
-        return cls.from_dict(tomllib.loads(Path(path).read_text()))
+    def load(cls, path: str | Path, *, me: list[str] | None = None) -> "Rules":
+        return cls.from_dict(tomllib.loads(Path(path).read_text()), me=me)
 
     def _key(self, tpl: str, n: Notification, rule: str) -> str:
         vals = _Blank({k: v for k, v in n.to_json().items() if isinstance(v, (str, int, float))})
+        vals.update(derived(n))
         vals["rule"] = rule
         try:
             return tpl.format_map(vals)
@@ -104,12 +137,12 @@ class Rules:
             return f"{n.app}:{n.title}"
 
     def match(self, n: Notification) -> Match | None:
-        head = f"{n.title}\n{n.subtitle}".lower()
-        if self.vip and _app_ok(n.app, self.vip_apps):
-            for name in self.vip:
-                if name.lower() in head:
-                    return Match("vip", "vip", f"vip:{name.lower()}")
         texts = _texts(n)
+        if self.vip and _app_ok(n.app, self.vip_apps):
+            who = f"{texts['head']}\n{texts['sender']}".lower()
+            for name in self.vip:
+                if name.lower() in who:
+                    return Match("vip", "vip", f"vip:{name.lower()}")
         for r in self.rules:
             if not _app_ok(n.app, r.apps):
                 continue
@@ -124,6 +157,12 @@ class Rules:
         return any(fnmatch.fnmatchcase(signal, p) for p in self.focus_allow)
 
 
+def config_handles(cfg: Any) -> list[str] | None:
+    """[me] handles in config.toml override the rules file's own list."""
+    h = cfg.raw.get("me", {}).get("handles")
+    return list(h) if h is not None else None
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="bulbsig rules")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -134,12 +173,9 @@ def main(argv: list[str]) -> int:
     t.add_argument("--body", default="")
     t.add_argument("--rules", help="rules TOML (default: config rules_file)")
     a = ap.parse_args(argv)
-    if a.rules:
-        path = Path(a.rules)
-    else:
-        from . import config
-        path = config.load().rules_file
-    rules = Rules.load(path)
+    from . import config
+    cfg = config.load()
+    rules = Rules.load(Path(a.rules) if a.rules else cfg.rules_file, me=config_handles(cfg))
     n = Notification(source="cli", app=a.app, title=a.title, subtitle=a.subtitle, body=a.body)
     m = rules.match(n)
     if m is None:

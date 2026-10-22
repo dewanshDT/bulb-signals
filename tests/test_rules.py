@@ -11,7 +11,7 @@ ICAL = "com.apple.iCal"
 
 @pytest.fixture(scope="module")
 def rules() -> Rules:
-    return Rules.load(PKG_DIR / "rules_default.toml")
+    return Rules.load(PKG_DIR / "rules_default.toml", me=["Dewansh"])
 
 
 def n(app: str, title: str = "", body: str = "", subtitle: str = "") -> Notification:
@@ -23,46 +23,68 @@ def sig(rules: Rules, *a, **kw) -> str | None:
     return m.signal if m else None
 
 
-@pytest.mark.parametrize("app,title,body,subtitle,expect", [
-    (SLACK, "Alice Smith", "Alice is inviting you to a huddle", "", "ringing"),
-    (SLACK, "Huddle", "Bob invited you to a huddle in #eng", "", "ringing"),
-    ("us.zoom.xos", "Zoom", "Carol is calling you", "", "ringing"),
-    (SLACK, "#incident-db", "Primary is failing over", "", "incident"),
-    (SLACK, "Dana in #alerts", "CPU high on api-3", "", "incident"),
-    (SLACK, "#eng", "SEV1 declared: checkout is down", "", "incident"),
-    (SLACK, "#eng", "we have an outage in eu-west", "", "incident"),
-    ("com.pagerduty.ios", "Triggered", "db latency", "", "incident"),
-    (SLACK, "GitHub", "CI failed on main: tests", "", "incident"),
-    ("com.github.GitHubClient", "Build", "Workflow failing on PR #12", "", "incident"),
-    (SLACK, "GitHub", "All checks have passed on #42", "", "success"),
-    (ZEN, "GitHub", "dewansh approved your pull request", "", "success"),
-    (ICAL, "Standup", "Now", "", "meeting_t0"),
-    (ICAL, "Design review", "10:00–10:30", "", "meeting_t5"),
-    (ZEN, "Google Calendar", "Standup is starting now · meet.google.com/abc", "", "meeting_t0"),
-    (ZEN, "Google Calendar", "Standup starts in 5 minutes", "", "meeting_t5"),
-    (SLACK, "Google Calendar", "Event starting in 10 minutes: Planning", "", "meeting_t5"),
-    ("com.microsoft.teams2", "Planning", "Meeting starts in 5 min", "", "meeting_t5"),
-    (SLACK, "#eng", "@dewansh can you look at this?", "", "mention"),
-    (SLACK, "Eve in #random", "Eve mentioned you: lunch?", "", "mention"),
-    (SLACK, "#random", "anyone up for lunch?", "", None),
-    (SLACK, "Frank", "hey, got a sec?", "", "dm"),
-    (SLACK, "Frank", "the deploy is starting", "", "dm"),
-    (ZEN, "YouTube", "New video from a channel you follow", "", None),
-    (ZEN, "Gmail", "Your build is ready", "", None),
+WS = "acme"  # Slack puts the workspace in the title
+
+
+# Shapes copied from real macOS 27.0 records (text is synthetic).
+@pytest.mark.parametrize("app,title,subtitle,body,expect", [
+    (SLACK, WS, "#random", "Sam: lunch?", None),
+    (SLACK, WS, "#pr-reviews", "Sam: @Alex can you review this?", None),
+    (SLACK, WS, "#pr-reviews", "Sam: @dewansh can you review this?", "mention"),
+    (SLACK, WS, "#pr-reviews", "Sam: @Dewansh RE: tabs PR", "mention"),
+    (SLACK, WS, "#eng", "Sam: ping @dewanshx", None),
+    (SLACK, WS, "#eng", "Sam: I'll call you now, we know the deploy is starting", None),
+    (SLACK, WS, "#auto-sentry", "Sentry: 🔴 TRPCError\nInternal server error", None),
+    (SLACK, WS, "#eng", "Sentry: 🔴 TypeError @Dewansh", None),
+    (SLACK, WS, "Sam Lee", "hey, got a minute?", "dm"),
+    (SLACK, WS, "Sam Lee, Ana", "Ana: thoughts on this?", "dm"),
+    (SLACK, WS, "Sam Lee", "Sam Lee is inviting you to a huddle", "ringing"),
+    (SLACK, WS, "#eng", "Sam: huddle in 5?", None),
+    (SLACK, WS, "Slackbot", "Reminder: submit timesheet", "dm"),
+    (SLACK, WS, "#incident-db", "Pat: primary is failing over", "incident"),
+    (SLACK, WS, "#alerts", "Bot: CPU high on api-3", "incident"),
+    (ZEN, "Session ready", "via claude.ai", "Your Claude Code session is ready", None),
+    (ZEN, "Standup", "via calendar.google.com", "Now · Google Meet", "meeting_t0"),
+    (ZEN, "Standup", "via calendar.google.com", "10:00 – 10:30am", "meeting_t5"),
+    (ZEN, "Sam joined", "via meet.google.com", "Sam is waiting for you", "meeting_t0"),
+    (ZEN, "CI", "via github.com", "Workflow failed on main", "incident"),
+    (ZEN, "PR", "via github.com", "Alex approved your pull request", "success"),
+    (ZEN, "Gmail", "via mail.google.com", "Your build failed", None),
+    ("notion.id", "Roadmap", "", "Alex mentioned you in Roadmap", "mention"),
+    ("com.pagerduty.ios", "Triggered", "", "db latency", "incident"),
+    (ICAL, "Standup", "", "Now", "meeting_t0"),
+    (ICAL, "Design review", "", "10:00–10:30", "meeting_t5"),
+    ("us.zoom.xos", "Zoom", "", "Carol is calling you", "ringing"),
 ])
-def test_default_rules(rules, app, title, body, subtitle, expect):
+def test_default_rules(rules, app, title, subtitle, body, expect):
     assert sig(rules, app, title, body, subtitle=subtitle) == expect
 
 
-def test_subtitle_channel_counts_as_channel(rules):
-    assert sig(rules, SLACK, "Grace", "lol", subtitle="#random") is None
-    assert sig(rules, SLACK, "Grace", "@here deploy freeze", subtitle="#eng") == "mention"
+def test_derived_sender_and_channel():
+    from bulbsig.rules import derived
+    assert derived(n(SLACK, WS, "Sam: hi", "#eng")) == {"sender": "Sam", "channel": "#eng"}
+    assert derived(n(SLACK, WS, "hi", "Sam Lee")) == {"sender": "Sam Lee", "channel": ""}
+    assert derived(n(ZEN, "T", "x", "via claude.ai")) == {"sender": "", "channel": ""}
 
 
 def test_keys(rules):
-    m = rules.match(n(SLACK, "Frank", "hi"))
-    assert m == Match("slack-dm", "dm", "dm:Frank", None)
-    assert rules.match(n(SLACK, "#incident", "x")).key == "incident:#incident"
+    assert rules.match(n(SLACK, WS, "hi", "Sam Lee")) == Match("slack-dm", "dm", "dm:Sam Lee", None)
+    assert rules.match(n(SLACK, WS, "Sam: @Dewansh x", "#eng")).key == "mention:#eng"
+    assert rules.match(n(SLACK, WS, "Sam Lee is inviting you to a huddle", "Sam Lee")).key == "call:Sam Lee"
+    assert rules.match(n(SLACK, WS, "Pat: x", "#incident-db")).key == "incident:#incident-db"
+
+
+def test_no_handles_means_no_mentions():
+    r = Rules.load(PKG_DIR / "rules_default.toml", me=[])
+    assert r.match(n(SLACK, WS, "Sam: @dewansh hi", "#eng")) is None
+    r = Rules.load(PKG_DIR / "rules_default.toml", me=["@dewansh", "here"])
+    assert r.match(n(SLACK, WS, "Sam: @here deploy freeze", "#eng")).signal == "mention"
+
+
+def test_vip_by_channel_sender():
+    r = Rules.from_dict({"vip": {"names": ["Big Boss"]}, "rule": [{"name": "all", "signal": "dm"}]})
+    assert r.match(n(SLACK, WS, "Big Boss: need you", "#eng")).signal == "vip"
+    assert r.match(n(SLACK, WS, "Sam: Big Boss said hi", "#eng")).signal == "dm"
 
 
 def test_vip_first(rules):
@@ -126,7 +148,7 @@ def test_missing_signal_rejected():
 
 def test_cli(capsys):
     path = str(PKG_DIR / "rules_default.toml")
-    assert main(["test", "--rules", path, "--app", SLACK, "--title", "Frank", "--body", "hi"]) == 0
+    assert main(["test", "--rules", path, "--app", SLACK, "--title", WS, "--subtitle", "Frank", "--body", "hi"]) == 0
     assert "signal=dm key=dm:Frank" in capsys.readouterr().out
     assert main(["test", "--rules", path, "--app", ZEN, "--title", "x"]) == 1
     assert "no match" in capsys.readouterr().out
