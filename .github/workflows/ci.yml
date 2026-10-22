@@ -1,0 +1,39 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e '.[dev]'
+      - run: pytest -q
+
+  macos-sensor:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: System
+        run: sw_vers && /usr/bin/python3 --version && which -a python3
+      - name: Sensor smoke on the system python
+        run: /usr/bin/python3 tests/sensor_smoke.py
+      # Runners lack Full Disk Access, so this records where the real DB is and how the sensor reports it.
+      - name: Probe the real Notification Center DB
+        run: |
+          ls -la "$HOME/Library/Group Containers/group.com.apple.usernoted/db2" 2>&1 || true
+          ls -la "$(getconf DARWIN_USER_DIR)com.apple.notificationcenter/db2" 2>&1 || true
+          set +e
+          /usr/bin/python3 -I bulbsig/sensor_macos.py probe --schema -n 5
+          echo "probe exit code: $?"
