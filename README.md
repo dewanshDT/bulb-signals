@@ -110,3 +110,6 @@ LAN address and set a token. Point the Mac sensor at it with `[daemon] url`.
 .venv/bin/pytest                      # unit tests
 .venv/bin/pytest --hardware -s        # also drives the real bulbs, restoring them afterwards
 ```
+
+On macOS the WiZ unit tests need extra loopback addresses first:
+`for i in 2 3 4 5 6 7; do sudo ifconfig lo0 alias 127.0.0.$i up; done`.
