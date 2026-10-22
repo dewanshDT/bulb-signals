@@ -240,7 +240,7 @@ class BulbTUI(App[int]):
     ]
 
     def __init__(self, client: DaemonClient, *, backoff_initial: float = 1.0,
-                 backoff_max: float = 30.0, poll_s: float = 15.0) -> None:
+                 backoff_max: float = 5.0, poll_s: float = 15.0) -> None:
         super().__init__()
         self.client = client
         self.backoff_initial = backoff_initial
