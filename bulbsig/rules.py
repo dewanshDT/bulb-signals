@@ -44,18 +44,25 @@ class _Blank(dict):
 
 
 _SENDER = re.compile(r"^([^:\n]{1,60}): ")
+_SLUG = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
 
 def derived(n: Notification) -> dict[str, str]:
-    """Slack on macOS: title = workspace, subtitle = "#channel" or the DM sender,
-    body = "Sender: text" in channels. Web pushes: subtitle = "via <site>"."""
+    """Slack on macOS: title = workspace; subtitle = "#channel", a private
+    channel's bare slug, or the DM sender(s); body = "Sender: text" except in
+    1:1 DMs. Web pushes: subtitle = "via <site>"."""
     sub = n.subtitle.strip()
-    channel = sub if sub.startswith("#") else ""
-    if sub and not channel and not sub.startswith("via "):
-        sender = sub
+    m = _SENDER.match(n.body)
+    if sub.startswith("#"):
+        channel = sub
+    elif m and _SLUG.match(sub):  # private channels show no '#'; names are lowercase, no spaces
+        channel = "#" + sub
     else:
-        m = _SENDER.match(n.body)
+        channel = ""
+    if channel or not sub or sub.startswith("via ") or (m and "," in sub):
         sender = m.group(1) if m else ""
+    else:
+        sender = sub
     return {"sender": sender, "channel": channel}
 
 

@@ -37,6 +37,11 @@ WS = "acme"  # Slack puts the workspace in the title
     (SLACK, WS, "#auto-sentry", "Sentry: 🔴 TRPCError\nInternal server error", None),
     (SLACK, WS, "#eng", "Sentry: 🔴 TypeError @Dewansh", None),
     (SLACK, WS, "Sam Lee", "hey, got a minute?", "dm"),
+    (SLACK, WS, "Sharooq", "bro what discussion is this", "dm"),
+    (SLACK, WS, "internal-dev", "Vivek: @Sharooq can you check", None),
+    (SLACK, WS, "internal-dev", "Vivek: @Dewansh can you check", "mention"),
+    (SLACK, WS, "internal-dev", "Vivek: deploy is done", None),
+    (SLACK, WS, "Sam Lee", "Note: call me later", "dm"),
     (SLACK, WS, "Sam Lee, Ana", "Ana: thoughts on this?", "dm"),
     (SLACK, WS, "Sam Lee", "Sam Lee is inviting you to a huddle", "ringing"),
     (SLACK, WS, "#eng", "Sam: huddle in 5?", None),
@@ -65,6 +70,8 @@ def test_derived_sender_and_channel():
     assert derived(n(SLACK, WS, "Sam: hi", "#eng")) == {"sender": "Sam", "channel": "#eng"}
     assert derived(n(SLACK, WS, "hi", "Sam Lee")) == {"sender": "Sam Lee", "channel": ""}
     assert derived(n(ZEN, "T", "x", "via claude.ai")) == {"sender": "", "channel": ""}
+    assert derived(n(SLACK, WS, "Vivek: hi", "internal-dev")) == {"sender": "Vivek", "channel": "#internal-dev"}
+    assert derived(n(SLACK, WS, "Ana: hi", "Sam Lee, Ana")) == {"sender": "Ana", "channel": ""}
 
 
 def test_keys(rules):
