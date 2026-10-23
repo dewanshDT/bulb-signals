@@ -91,6 +91,10 @@ class StubCal:
     def mode_changed(self, mode, active):
         self.modes.append((mode, active))
 
+    def add_adhoc(self, title, start, end):
+        self.adhoc = getattr(self, "adhoc", []) + [(title, start, end)]
+        return object() if len(self.adhoc) == 1 else None
+
 
 class FakeClock:
     t = 1000.0
@@ -356,3 +360,17 @@ async def test_serve_lifecycle(monkeypatch, tmp_path):
         await asyncio.wait_for(task, 5)
         sse.close()
     assert restored.is_set()
+
+
+async def test_calendar_push_schedules_meeting(env):
+    client, engine, cal, _, _ = env
+    note = {"source": "mac", "app": "app.zen-browser.zen", "title": "Daily Sync",
+            "subtitle": "via calendar.google.com", "body": "10:30 – 10:45am", "time": 1792650000}
+    st, out = await post(client, "/v1/notify", note)
+    assert st == 200 and out["rule"] == "calendar-web" and out["job"] is None
+    assert out["meeting"]["new"] is True
+    title, start, end = cal.adhoc[0]
+    assert title == "Daily Sync" and (start.hour, start.minute, end.hour, end.minute) == (10, 30, 10, 45)
+    _, again = await post(client, "/v1/notify", note)
+    assert again["meeting"]["new"] is False
+    assert not [c for c in engine.calls if c[0] == "trigger"]

@@ -49,8 +49,7 @@ WS = "acme"  # Slack puts the workspace in the title
     (SLACK, WS, "#incident-db", "Pat: primary is failing over", "incident"),
     (SLACK, WS, "#alerts", "Bot: CPU high on api-3", "incident"),
     (ZEN, "Session ready", "via claude.ai", "Your Claude Code session is ready", None),
-    (ZEN, "Standup", "via calendar.google.com", "Now · Google Meet", "meeting_t0"),
-    (ZEN, "Standup", "via calendar.google.com", "10:00 – 10:30am", "meeting_t5"),
+    (ZEN, "Standup", "via calendar.google.com", "10:00 – 10:30am", "meeting_t10"),
     (ZEN, "Sam joined", "via meet.google.com", "Sam is waiting for you", "meeting_t0"),
     (ZEN, "CI", "via github.com", "Workflow failed on main", "incident"),
     (ZEN, "PR", "via github.com", "Alex approved your pull request", "success"),
@@ -159,3 +158,17 @@ def test_cli(capsys):
     assert "signal=dm key=dm:Frank" in capsys.readouterr().out
     assert main(["test", "--rules", path, "--app", ZEN, "--title", "x"]) == 1
     assert "no match" in capsys.readouterr().out
+
+
+def test_calendar_push_is_scheduled(rules):
+    m = rules.match(n(ZEN, "Daily Sync", "10:30 – 10:45am", subtitle="via calendar.google.com"))
+    assert (m.rule, m.meeting) == ("calendar-web", True)
+    assert not rules.match(n(ZEN, "Sam is waiting", "join now", subtitle="via meet.google.com")).meeting
+
+
+def test_vip_whole_word_and_config_override():
+    r = Rules.load(PKG_DIR / "rules_default.toml", me=["Dewansh"], vip=["Tony", "Yermie"])
+    assert r.match(n(SLACK, WS, "Tony: can you look?", "#eng")).signal == "vip"
+    assert r.match(n(SLACK, WS, "got a sec?", "Yermie")).signal == "vip"
+    assert r.match(n(SLACK, WS, "Antony: hi", "#eng")) is None
+    assert r.match(n(SLACK, WS, "hi", "Antony")).signal == "dm"

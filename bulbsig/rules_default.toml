@@ -21,6 +21,7 @@
 #       case-insensitive; all given must match
 #     not_<field> = "regex"   rule is skipped if it matches
 #     ignore = true           stop here with no signal
+#     meeting = true          schedule a meeting countdown from the text instead of one signal
 #   [focus]  allow = signal names / globs that still fire while focus mode is on
 
 [apps]
@@ -37,7 +38,7 @@ alerting = ["com.pagerduty.*", "com.opsgenie.*", "com.atlassian.opsgenie*"]
 handles = []
 
 [vip]
-names = []
+names = []   # whole-word, case-insensitive; config.toml [vip] names overrides
 # apps = ["slack"]
 
 [focus]
@@ -117,10 +118,21 @@ apps = ["calendar", "zoom", "teams"]
 signal = "meeting_t5"
 key = "meeting:{title}"
 
+# Google Calendar web pushes (Zen) arrive once, at the event's reminder time
+# (10 min before by default). `meeting = true` makes the daemon read the start /
+# end from the text and run the full countdown + ON AIR via the calendar watcher.
+[[rule]]
+name = "calendar-web"
+apps = ["zen"]
+subtitle = '^via calendar\.google\.com'
+signal = "meeting_t10"
+meeting = true
+key = "meeting:{title}"
+
 [[rule]]
 name = "meeting-now-web"
 apps = ["zen"]
-subtitle = '^via (meet\.google\.com|calendar\.google\.com|[\w.]*zoom\.us|teams\.microsoft\.com|teams\.live\.com)'
+subtitle = '^via (meet\.google\.com|[\w.]*zoom\.us|teams\.microsoft\.com|teams\.live\.com)'
 any = 'starting now|is starting|starts now|has started|\bnow\b|joined|is waiting'
 signal = "meeting_t0"
 key = "meeting:{title}"
@@ -128,7 +140,7 @@ key = "meeting:{title}"
 [[rule]]
 name = "meeting-soon-web"
 apps = ["zen"]
-subtitle = '^via (meet\.google\.com|calendar\.google\.com|[\w.]*zoom\.us|teams\.microsoft\.com|teams\.live\.com)'
+subtitle = '^via (meet\.google\.com|[\w.]*zoom\.us|teams\.microsoft\.com|teams\.live\.com)'
 signal = "meeting_t5"
 key = "meeting:{title}"
 

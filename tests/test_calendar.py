@@ -195,3 +195,54 @@ def test_cli(capsys):
     assert main(["--url", str(FIX), "--hours", "1"]) == 0
     assert capsys.readouterr().out
     assert main(["--url", "/nonexistent.ics"]) == 1
+
+
+@pytest.mark.parametrize("text,start,end", [
+    ("10:30 – 11:00am", "10:30", "11:00"),
+    ("10:30am – 12:00pm", "10:30", "12:00"),
+    ("2:00 – 2:30pm", "14:00", "14:30"),
+    ("10:30 – 10:45", "10:30", "10:45"),
+    ("In 10 minutes", "10:30", "11:00"),
+    ("Now · Google Meet", "10:20", "10:50"),
+    ("at 10:45am", "10:45", "11:15"),
+    ("Q3 – 4 planning", "10:30", "11:00"),
+    ("Delivery Team Daily Sync", "10:30", "11:00"),
+])
+def test_parse_push(text, start, end):
+    from bulbsig.calendar_ics import parse_push
+    s, e = parse_push(text, datetime(2026, 10, 22, 10, 20, tzinfo=UTC))
+    assert (s.strftime("%H:%M"), e.strftime("%H:%M")) == (start, end)
+
+
+def test_parse_push_past_midnight():
+    from bulbsig.calendar_ics import parse_push
+    s, e = parse_push("11:50pm – 12:20am", datetime(2026, 10, 22, 23, 40, tzinfo=UTC))
+    assert (s.day, s.hour, e.day, e.hour) == (22, 23, 23, 0)
+    s, _ = parse_push("12:05am – 12:30am", datetime(2026, 10, 22, 23, 55, tzinfo=UTC))
+    assert (s.day, s.hour, s.minute) == (23, 0, 5)
+
+
+async def test_adhoc_meeting_counts_down_without_feed():
+    rec, clock = Rec(), at(10, 20)
+    w = CalendarWatcher([], trigger=lambda s, k: rec.triggers.append((s, k)),
+                        set_mode=lambda m, a: rec.modes.append((m, a)), publish=rec.events.append, now=clock)
+    await w.refresh()
+    m = w.add_adhoc("Daily Sync", clock.t + timedelta(minutes=10), clock.t + timedelta(minutes=25))
+    assert m is not None and [x["title"] for x in w.upcoming()] == ["Daily Sync"]
+    await run_until(w, clock, at(10, 46).t, step_s=5)
+    assert rec.signals() == ["meeting_t10", "meeting_t5", "meeting_t2", "meeting_t1", "meeting_t0"]
+    assert rec.modes == [("on_air", True), ("on_air", False)]
+
+
+async def test_adhoc_dedups_against_feed_and_itself():
+    rec, clock = Rec(), at(8, 52)
+    w = rec.watcher(FIX, clock)
+    await w.refresh()
+    feed_start = datetime(2026, 10, 22, 9, 0, tzinfo=UTC)
+    assert w.add_adhoc("standup", feed_start + timedelta(seconds=60), feed_start + timedelta(minutes=15)) is None
+    assert w.add_adhoc("Other", feed_start, feed_start + timedelta(minutes=30)) is not None
+    assert w.add_adhoc("other ", feed_start, feed_start + timedelta(minutes=30)) is None
+    await w.refresh()  # survives a feed refresh
+    assert sorted(x["title"] for x in w.upcoming()) == ["Design review", "Other", "Standup"]
+    await run_until(w, clock, at(9, 1).t, step_s=5)
+    assert rec.signals().count("meeting_t0") == 2  # one per meeting, not per source

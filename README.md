@@ -34,6 +34,9 @@ ip = "192.168.1.14"
 [me]
 handles = ["Dewansh"]          # your Slack @handle(s); add "here", "channel" to count those
 
+[vip]
+names = ["Tony", "Yermie"]     # whole-word, case-insensitive; sender gets the gold sparkle
+
 [quiet]
 start = "23:00"
 end = "08:00"
@@ -41,6 +44,7 @@ max_bri = 10
 
 [calendar]
 ics = ["https://calendar.google.com/calendar/ical/.../basic.ics"]   # Google "secret address in iCal format"
+push_lead_min = 10             # Google Calendar reminder lead, used when a push has no readable time
 # on_air_until_ack = true
 ```
 
@@ -112,6 +116,12 @@ LAN address and set a token. Point the Mac sensor at it with `[daemon] url`.
     reminders light up.
   - Zen web pushes carry `via <site>` in the subtitle; meetings are matched
     by site.
+- **Meetings come from two sources, merged by title and start time:**
+  - **Google Calendar pushes in Zen.** The reminder (10 min before by
+    default) is enough. The daemon reads the start/end from its text, or
+    assumes `push_lead_min`, then runs the whole countdown
+    (T-10 → T-5 → T-2 → T-1 → now) and turns ON AIR on and off.
+  - **The `[calendar] ics` feed**, if set.
 
 ## Tests
 

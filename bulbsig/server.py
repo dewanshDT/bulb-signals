@@ -58,6 +58,20 @@ class Daemon:
         self.subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
         self.streams: set[asyncio.Task[Any]] = set()
 
+
+    def schedule_meeting(self, n: Notification) -> dict[str, Any] | None:
+        """A calendar push becomes a meeting the calendar watcher counts down to."""
+        from datetime import datetime
+        from .calendar_ics import parse_push
+        received = datetime.fromtimestamp(n.time).astimezone()
+        cal = self.cfg.raw.get("calendar", {})
+        start, end = parse_push(f"{n.body}\n{n.subtitle}\n{n.title}", received,
+                                default_lead_min=float(cal.get("push_lead_min", 10)),
+                                default_len_min=float(cal.get("push_len_min", 30)))
+        m = self.calendar.add_adhoc(n.title, start, end)
+        info = {"title": n.title, "start": start.isoformat(), "end": end.isoformat(), "new": m is not None}
+        log.info("meeting from %s: %s", n.app, info)
+        return info
     def publish(self, event: dict[str, Any]) -> None:
         for q in list(self.subscribers):
             with contextlib.suppress(asyncio.QueueFull):
@@ -145,7 +159,9 @@ def _routes(d: Daemon) -> web.RouteTableDef:
         out: dict[str, Any] = {"rule": None, "signal": None, "job": None}
         if m is not None:
             out.update(rule=m.rule, signal=m.signal)
-            if d.focus and not d.focus_allowed(m.signal):
+            if m.meeting and d.calendar is not None and hasattr(d.calendar, "add_adhoc"):
+                out["meeting"] = d.schedule_meeting(n)
+            elif d.focus and not d.focus_allowed(m.signal):
                 d.focus_suppressed += 1
                 out["suppressed"] = "focus"
             else:
@@ -322,25 +338,24 @@ def build_app(cfg: Any, engine: EngineAPI, rules: Any, calendar: Any = None, pat
 async def serve(cfg: Any) -> None:
     from . import engine as engine_mod, patterns as patterns_mod, wiz
     from .calendar_ics import CalendarWatcher
-    from .rules import Rules, config_handles
+    from .rules import Rules, config_handles, config_vip
 
     bulbs = await wiz.open_bulbs(cfg)
     pats = patterns_mod.load(cfg.patterns_file)
     engine = engine_mod.Engine(bulbs, pats, quiet=(cfg.quiet_start, cfg.quiet_end, cfg.quiet_max_bri))
-    rules = Rules.load(cfg.rules_file, me=config_handles(cfg))
-    calendar = None
-    if cfg.ics_urls:
-        until_ack = bool(cfg.raw.get("calendar", {}).get("on_air_until_ack", False))
-        calendar = CalendarWatcher(
-            cfg.ics_urls,
-            trigger=lambda s, k: engine.trigger(s, key=k, origin={"source": "calendar"}),
-            set_mode=engine.set_mode, poll_s=cfg.calendar_poll_s, on_air_until_ack=until_ack)
+    rules = Rules.load(cfg.rules_file, me=config_handles(cfg), vip=config_vip(cfg))
+    # always on: meetings also arrive as notifications, even without an ICS feed
+    until_ack = bool(cfg.raw.get("calendar", {}).get("on_air_until_ack", False))
+    calendar = CalendarWatcher(
+        cfg.ics_urls,
+        trigger=lambda s, k: engine.trigger(s, key=k, origin={"source": "calendar"}),
+        set_mode=engine.set_mode, poll_s=cfg.calendar_poll_s, on_air_until_ack=until_ack)
     app = build_app(cfg, engine, rules, calendar, pats)
     host, port = split_listen(cfg.listen)
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     await web.TCPSite(runner, host, port).start()
-    log.info("bulbsig daemon on http://%s:%d (%d bulbs, calendar=%s)", host, port, len(bulbs), bool(calendar))
+    log.info("bulbsig daemon on http://%s:%d (%d bulbs, %d calendar feeds)", host, port, len(bulbs), len(cfg.ics_urls))
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

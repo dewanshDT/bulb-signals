@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import inspect
 import logging
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -57,6 +58,58 @@ def parse_meetings(cal: icalendar.Calendar, start: datetime, end: datetime) -> l
     return sorted(out, key=lambda m: (m.start, m.uid))
 
 
+_NOW = re.compile(r"\b(starting now|starts now|is starting|has started|now)\b", re.I)
+_IN_MIN = re.compile(r"\bin (\d{1,3}) ?min", re.I)
+_CLOCK = r"(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)?"
+_RANGE = re.compile(_CLOCK + r"\s*[–—-]\s*" + _CLOCK, re.I)
+_ONE = re.compile(r"\b(?:at\s+)?(\d{1,2})(?::(\d{2}))\s*([ap]\.?m\.?)?|\b(\d{1,2})\s*([ap]\.?m\.?)", re.I)
+
+
+def _hm(h: str, m: str | None, ampm: str | None) -> tuple[int, int] | None:
+    hh, mm = int(h), int(m or 0)
+    if ampm:
+        pm = ampm.lower().startswith("p")
+        if not 1 <= hh <= 12:
+            return None
+        hh = hh % 12 + (12 if pm else 0)
+    return (hh, mm) if hh < 24 and mm < 60 else None
+
+
+def _at(received: datetime, hm: tuple[int, int]) -> datetime:
+    t = received.replace(hour=hm[0], minute=hm[1], second=0, microsecond=0)
+    if t < received - timedelta(hours=2):  # a reminder late in the evening for a meeting after midnight
+        t += timedelta(days=1)
+    return t
+
+
+def parse_push(text: str, received: datetime, *, default_lead_min: float = 10,
+               default_len_min: float = 30) -> tuple[datetime, datetime]:
+    """Start/end of a meeting from a calendar web-push (e.g. Google Calendar in a
+    browser). Falls back to "starts default_lead_min after the push"."""
+    start = end = None
+    r = _RANGE.search(text)
+    if r and not any(r.group(i) for i in (2, 3, 5, 6)):  # "Q3 – 4 planning" is not a time
+        r = None
+    if r:
+        a = _hm(r.group(1), r.group(2), r.group(3) or r.group(6))
+        b = _hm(r.group(4), r.group(5), r.group(6) or r.group(3))
+        if a and b:
+            start, end = _at(received, a), _at(received, b)
+            if end <= start:
+                end += timedelta(days=1)
+    if start is None and (m := _IN_MIN.search(text)):
+        start = received + timedelta(minutes=int(m.group(1)))
+    if start is None and _NOW.search(text):
+        start = received
+    if start is None and (o := _ONE.search(text)):
+        hm = _hm(o.group(1), o.group(2), o.group(3)) if o.group(1) else _hm(o.group(4), None, o.group(5))
+        if hm:
+            start = _at(received, hm)
+    if start is None:
+        start = received + timedelta(minutes=default_lead_min)
+    return start, end or start + timedelta(minutes=default_len_min)
+
+
 async def fetch(url: str, *, timeout: float = 20) -> bytes:
     u = urlparse(url)
     if u.scheme in ("http", "https", "webcal"):
@@ -105,6 +158,20 @@ class CalendarWatcher:
         self._overrun: Meeting | None = None
         self._last_overrun: datetime | None = None
         self._manual_off: set[str] = set()
+        self.adhoc: dict[str, Meeting] = {}
+
+    def add_adhoc(self, title: str, start: datetime, end: datetime) -> Meeting | None:
+        """A meeting learnt from a notification rather than a feed. Returns None if
+        the feed (or an earlier push) already has it."""
+        t = title.strip().casefold()
+        for m in [*self.meetings, *self.adhoc.values()]:
+            if m.title.strip().casefold() == t and abs((m.start - start).total_seconds()) <= 120:
+                return None
+        m = Meeting(f"push-{start.strftime('%Y%m%dT%H%M')}-{abs(hash(t)) % 10**8}", title.strip() or "(meeting)",
+                    start, end)
+        self.adhoc[m.base] = m
+        self.meetings = sorted([*self.meetings, m], key=lambda x: (x.start, x.uid))
+        return m
 
     async def refresh(self) -> None:
         for url in self.urls:
@@ -114,12 +181,19 @@ class CalendarWatcher:
             except Exception as e:  # keep the last good parse
                 self.errors[url] = f"{type(e).__name__}: {e}"
                 log.warning("calendar fetch failed for %s: %s", url, e)
-        self.meetings = self._expand(self.now(), timedelta(hours=24))
+        now = self.now()
+        self.adhoc = {b: m for b, m in self.adhoc.items() if m.end > now - PAST}
+        self.meetings = self._expand(now, timedelta(hours=24))
 
     def _expand(self, now: datetime, ahead: timedelta) -> list[Meeting]:
         seen: dict[str, Meeting] = {}
         for cal in self.cals.values():
             for m in parse_meetings(cal, now - PAST, now + ahead):
+                seen.setdefault(m.base, m)
+        feed = list(seen.values())
+        for m in self.adhoc.values():
+            t = m.title.strip().casefold()
+            if not any(f.title.strip().casefold() == t and abs((f.start - m.start).total_seconds()) <= 120 for f in feed):
                 seen.setdefault(m.base, m)
         return sorted(seen.values(), key=lambda m: (m.start, m.uid))
 

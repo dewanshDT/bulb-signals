@@ -22,9 +22,11 @@ class Match:
     signal: str
     key: str
     priority: int | None = None
+    meeting: bool = False
 
     def to_json(self) -> dict[str, Any]:
-        return {"rule": self.rule, "signal": self.signal, "key": self.key, "priority": self.priority}
+        return {"rule": self.rule, "signal": self.signal, "key": self.key, "priority": self.priority,
+                "meeting": self.meeting}
 
 
 @dataclass
@@ -36,6 +38,7 @@ class Rule:
     exclude: dict[str, re.Pattern[str]] = field(default_factory=dict)
     key: str = DEFAULT_KEY
     priority: int | None = None
+    meeting: bool = False
 
 
 class _Blank(dict):
@@ -97,7 +100,8 @@ class Rules:
         self.me: list[str] = []
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any], *, me: list[str] | None = None) -> "Rules":
+    def from_dict(cls, d: dict[str, Any], *, me: list[str] | None = None,
+                  vip: list[str] | None = None) -> "Rules":
         handles = list(me) if me is not None else list(d.get("me", {}).get("handles", []))
         me_re = me_pattern(handles)
 
@@ -123,16 +127,19 @@ class Rules:
                 exclude={f: rx(r["not_" + f]) for f in FIELDS if "not_" + f in r},
                 key=r.get("key", DEFAULT_KEY),
                 priority=r.get("priority"),
+                meeting=bool(r.get("meeting", False)),
             ))
-        vip = d.get("vip", {})
-        out = cls(rules, vip=list(vip.get("names", [])), vip_apps=expand(vip.get("apps")),
+        vip_cfg = d.get("vip", {})
+        names = list(vip) if vip is not None else list(vip_cfg.get("names", []))
+        out = cls(rules, vip=names, vip_apps=expand(vip_cfg.get("apps")),
                   focus_allow=set(d.get("focus", {}).get("allow", [])), apps=aliases)
         out.me = handles
         return out
 
     @classmethod
-    def load(cls, path: str | Path, *, me: list[str] | None = None) -> "Rules":
-        return cls.from_dict(tomllib.loads(Path(path).read_text()), me=me)
+    def load(cls, path: str | Path, *, me: list[str] | None = None,
+             vip: list[str] | None = None) -> "Rules":
+        return cls.from_dict(tomllib.loads(Path(path).read_text()), me=me, vip=vip)
 
     def _key(self, tpl: str, n: Notification, rule: str) -> str:
         vals = _Blank({k: v for k, v in n.to_json().items() if isinstance(v, (str, int, float))})
@@ -146,10 +153,10 @@ class Rules:
     def match(self, n: Notification) -> Match | None:
         texts = _texts(n)
         if self.vip and _app_ok(n.app, self.vip_apps):
-            who = f"{texts['head']}\n{texts['sender']}".lower()
+            who = f"{texts['head']}\n{texts['sender']}"
             for name in self.vip:
-                if name.lower() in who:
-                    return Match("vip", "vip", f"vip:{name.lower()}")
+                if re.search(rf"(?<!\w){re.escape(name.strip())}(?!\w)", who, re.I):
+                    return Match("vip", "vip", f"vip:{name.strip().lower()}")
         for r in self.rules:
             if not _app_ok(n.app, r.apps):
                 continue
@@ -157,7 +164,7 @@ class Rules:
                     not any(p.search(texts[f]) for f, p in r.exclude.items()):
                 if r.signal is None:
                     return None
-                return Match(r.name, r.signal, self._key(r.key, n, r.name), r.priority)
+                return Match(r.name, r.signal, self._key(r.key, n, r.name), r.priority, r.meeting)
         return None
 
     def focus_allowed(self, signal: str) -> bool:
@@ -168,6 +175,12 @@ def config_handles(cfg: Any) -> list[str] | None:
     """[me] handles in config.toml override the rules file's own list."""
     h = cfg.raw.get("me", {}).get("handles")
     return list(h) if h is not None else None
+
+
+def config_vip(cfg: Any) -> list[str] | None:
+    """[vip] names in config.toml override the rules file's own list."""
+    v = cfg.raw.get("vip", {}).get("names")
+    return list(v) if v is not None else None
 
 
 def main(argv: list[str]) -> int:
@@ -182,12 +195,13 @@ def main(argv: list[str]) -> int:
     a = ap.parse_args(argv)
     from . import config
     cfg = config.load()
-    rules = Rules.load(Path(a.rules) if a.rules else cfg.rules_file, me=config_handles(cfg))
+    rules = Rules.load(Path(a.rules) if a.rules else cfg.rules_file, me=config_handles(cfg), vip=config_vip(cfg))
     n = Notification(source="cli", app=a.app, title=a.title, subtitle=a.subtitle, body=a.body)
     m = rules.match(n)
     if m is None:
         print("no match")
         return 1
     focus = "allowed" if rules.focus_allowed(m.signal) else "suppressed"
-    print(f"rule={m.rule} signal={m.signal} key={m.key} priority={m.priority} focus={focus}")
+    extra = " meeting=scheduled" if m.meeting else ""
+    print(f"rule={m.rule} signal={m.signal} key={m.key} priority={m.priority} focus={focus}{extra}")
     return 0
