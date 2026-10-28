@@ -51,6 +51,14 @@ push_lead_min = 10             # Google Calendar reminder lead, used when a push
 ## Run
 
 ```sh
+./run.sh                           # daemon + sensor in the background, TUI in front; quit (q) stops all three
+```
+
+Logs go to `~/Library/Logs/bulbsig/`. A daemon or sensor that is already
+running (e.g. via `install.sh`) is reused, not doubled. Or run the pieces
+yourself:
+
+```sh
 bulbsig bulbs discover | status | on | off | color ff8800 | temp 2700 | scene fireplace   [-t desk|room|all]
 bulbsig daemon                     # engine + rules + calendar + HTTP API
 bulbsig tui                        # dashboard: space ack · p play · m mute · o ON AIR · f focus · / filter
