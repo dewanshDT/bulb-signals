@@ -5,7 +5,7 @@ import asyncio
 import itertools
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from datetime import time as dtime
 from typing import Any, Callable, Iterator
@@ -38,6 +38,26 @@ def _state_json(s: LightState | None) -> dict[str, Any] | None:
     return d
 
 
+def compose(cur: LightState | None, *, on: bool | None = None, bri: int | None = None,
+            rgb: tuple[int, int, int] | None = None, temp: int | None = None,
+            scene: int | None = None, speed: int | None = None) -> LightState:
+    """The resting state after a change. An off state keeps its colour so turning on brings it back."""
+    if rgb is not None:
+        look = LightState(on=True, rgb=tuple(rgb))  # type: ignore[arg-type]
+    elif temp is not None:
+        look = LightState(on=True, temp=temp)
+    elif scene:
+        look = LightState(on=True, scene=scene, speed=speed)
+    elif cur is not None and (cur.rgb or cur.temp or cur.scene):
+        look = cur
+    else:
+        look = LightState(on=True, temp=2700)
+    if on is None:
+        on = True if bri is not None or look is not cur else (cur.on if cur else True)
+    dim = bri if bri is not None else ((cur.dimming if cur else None) or 100)
+    return replace(look, on=on, dimming=dim)
+
+
 def _hhmm(s: str) -> dtime:
     h, m = s.split(":")
     return dtime(int(h), int(m))
@@ -51,7 +71,7 @@ class Engine:
         *,
         quiet: tuple[str, str, int] | None = None,
         merge_window: float = 20.0,
-        refresh_idle_s: float = 5.0,
+        refresh_idle_s: float = 1.0,
         min_step_ms: int = MIN_STEP_MS,
         time_scale: float = 1.0,
         clock: Callable[[], float] = time.time,
@@ -81,6 +101,7 @@ class Engine:
         self._base: dict[str, LightState] = {}
         self._shown: dict[str, LightState] = {}
         self._overlaid: dict[str, bool] = {}
+        self._pinned: set[str] = set()  # base set by set_light and not yet applied: never re-read over it
         self._reachable: dict[str, bool | None] = {r: None for r in bulbs}
         self._dirty: set[str] = set()
         self._touched: set[str] = set()
@@ -153,6 +174,18 @@ class Engine:
         else:
             self._muted_until = None
         self._emit({"type": "mute", "until": self._muted_until})
+
+    def set_light(self, role: str, **change: Any) -> LightState:
+        if role not in self.bulbs:
+            raise KeyError(f"unknown bulb {role!r}")
+        st = compose(self._base.get(role), **change)
+        self._base[role] = st
+        self._pinned.add(role)
+        self._dirty.add(role)
+        self._emit({"type": "light", "role": role, "state": _state_json(st)})
+        if self._playing is None:
+            self._kick()
+        return st
 
     def snapshot(self) -> dict[str, Any]:
         j = self._playing
@@ -276,12 +309,14 @@ class Engine:
     async def _refresh(self, roles: list[str]) -> None:
         stale = self._clock() - self._last_active > self._refresh_idle_s
         # A bulb showing a mode overlay is not showing its base, so reading it would lose the base.
-        todo = [r for r in roles if (stale or r not in self._base) and not self._overlaid.get(r)]
+        todo = [r for r in roles if (stale or r not in self._base) and not self._overlaid.get(r)
+                and r not in self._pinned]
         if todo:
             await asyncio.gather(*(self._read(r) for r in todo))
 
     async def _restore(self, roles: set[str]) -> None:
         async def one(r: str) -> None:
+            base = self._base.get(r)
             t = self._target(r)
             if t is None:
                 return
@@ -296,6 +331,8 @@ class Engine:
                 self._reachable[r] = True
             self._shown[r] = t
             self._overlaid[r] = self._overlay(r) is not None
+            if self._base.get(r) is base:
+                self._pinned.discard(r)
 
         await asyncio.gather(*(one(r) for r in sorted(roles) if r in self.bulbs))
         self._last_active = self._clock()

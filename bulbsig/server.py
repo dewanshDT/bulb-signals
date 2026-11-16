@@ -57,6 +57,7 @@ class Daemon:
         self.hb_fired: dict[str, float] = {}
         self.subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
         self.streams: set[asyncio.Task[Any]] = set()
+        self.presets: dict[str, Any] = dict(getattr(patterns, "presets", None) or {})
 
 
     def schedule_meeting(self, n: Notification) -> dict[str, Any] | None:
@@ -137,6 +138,59 @@ async def _body(req: web.Request) -> dict[str, Any]:
 
 def _err(status: int, msg: str) -> web.Response:
     return web.json_response({"error": msg}, status=status)
+
+
+class BadLight(ValueError):
+    def __init__(self, msg: str, status: int = 400) -> None:
+        super().__init__(msg)
+        self.status = status
+
+
+def _int(body: dict[str, Any], key: str, lo: int, hi: int) -> int | None:
+    v = body.get(key)
+    if v is None:
+        return None
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi:
+        raise BadLight(f"{key} must be a number in {lo}..{hi}")
+    return int(v)
+
+
+def light_change(body: dict[str, Any], presets: dict[str, Any]) -> dict[str, Any]:
+    """A /v1/light body as Engine.set_light keyword arguments."""
+    from .patterns import PatternError, _hex, scene_id
+    looks = [k for k in ("preset", "color", "temp", "scene") if body.get(k) is not None]
+    if len(looks) > 1:
+        raise BadLight(f"use one of preset, color, temp or scene, not {' and '.join(looks)}")
+    change: dict[str, Any] = {}
+    try:
+        if "preset" in looks:
+            pr = presets.get(str(body["preset"]))
+            if pr is None:
+                raise BadLight(f"unknown preset {body['preset']!r}", 404)
+            change = pr.change()
+        elif "color" in looks:
+            change["rgb"] = _hex(body["color"], "color")
+        elif "temp" in looks:
+            change["temp"] = _int(body, "temp", 2200, 6500)
+        elif "scene" in looks:
+            change["scene"] = scene_id(body["scene"], "scene")
+            if (sp := _int(body, "speed", 10, 200)) is not None:
+                change["speed"] = sp
+    except PatternError as e:
+        raise BadLight(str(e)) from None
+    if (bri := _int(body, "bri", 10, 100)) is not None:
+        change["bri"] = bri
+    if "on" in body:
+        if not isinstance(body["on"], bool):
+            raise BadLight("on must be true or false")
+        change["on"] = body["on"]
+    if not change:
+        raise BadLight("nothing to change; give on, bri, preset, color, temp or scene")
+    return change
+
+
+def _d(x: Any) -> dict[str, Any]:
+    return x if isinstance(x, dict) else {}
 
 
 def _routes(d: Daemon) -> web.RouteTableDef:
@@ -226,6 +280,32 @@ def _routes(d: Daemon) -> web.RouteTableDef:
         d.sources[src] = d.clock()
         d.hb_fired.pop(src, None)
         return web.json_response({})
+
+    @r.post("/v1/light")
+    async def light(req: web.Request) -> web.Response:
+        body = await _body(req)
+        roles = list(_d(d.engine.snapshot().get("bulbs")))
+        want = body.get("bulbs", "all")
+        if want == "all":
+            targets = roles
+        elif isinstance(want, str):
+            targets = [want]
+        elif isinstance(want, list) and want and all(isinstance(x, str) for x in want):
+            targets = roles if "all" in want else list(dict.fromkeys(want))
+        else:
+            return _err(400, "bulbs must be 'all', a role or a list of roles")
+        if unknown := [t for t in targets if t not in roles]:
+            return _err(404, f"unknown bulb {unknown[0]!r}; known: {', '.join(roles) or 'none'}")
+        try:
+            change = light_change(body, d.presets)
+        except BadLight as e:
+            return _err(e.status, str(e))
+        out = {t: dataclasses.asdict(d.engine.set_light(t, **change)) for t in targets}
+        return web.json_response({"bulbs": out})
+
+    @r.get("/v1/presets")
+    async def presets(req: web.Request) -> web.Response:
+        return web.json_response([p.to_json() for p in d.presets.values()])
 
     @r.get("/v1/state")
     async def state(req: web.Request) -> web.Response:
@@ -342,6 +422,8 @@ async def serve(cfg: Any) -> None:
 
     bulbs = await wiz.open_bulbs(cfg)
     pats = patterns_mod.load(cfg.patterns_file)
+    if not pats.presets:  # a patterns file copied before presets existed
+        pats.presets = patterns_mod.load(patterns_mod.DEFAULT_FILE).presets
     engine = engine_mod.Engine(bulbs, pats, quiet=(cfg.quiet_start, cfg.quiet_end, cfg.quiet_max_bri))
     rules = Rules.load(cfg.rules_file, me=config_handles(cfg), vip=config_vip(cfg))
     # always on: meetings also arrive as notifications, even without an ICS feed

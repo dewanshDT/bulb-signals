@@ -378,3 +378,90 @@ async def test_shutdown_restores(bulbs, clock):
     with pytest.raises(asyncio.CancelledError):
         await task
     assert bulbs["desk"].state == BASE_DESK and bulbs["room"].state == BASE_ROOM
+
+
+def test_compose():
+    from bulbsig.engine import compose
+    cur = LightState(on=True, dimming=40, rgb=(255, 0, 0))
+    assert compose(cur, temp=4000) == LightState(on=True, dimming=40, temp=4000)
+    assert compose(cur, rgb=(0, 0, 255), bri=70) == LightState(on=True, dimming=70, rgb=(0, 0, 255))
+    assert compose(cur, scene=5, speed=120) == LightState(on=True, dimming=40, scene=5, speed=120)
+    off = compose(cur, on=False)
+    assert not off.on and off.rgb == (255, 0, 0)
+    assert compose(off, on=True) == cur
+    assert compose(off, bri=60) == LightState(on=True, dimming=60, rgb=(255, 0, 0))
+    assert compose(None, on=True) == LightState(on=True, dimming=100, temp=2700)
+    assert compose(LightState(on=False), temp=3000).on
+
+
+async def test_set_light_applies_when_idle(eng, bulbs):
+    e, q = eng
+    st = e.set_light("desk", temp=4000)
+    assert st == LightState(on=True, dimming=100, temp=4000)
+    ev = await until(q, lambda ev: ev["type"] == "light")
+    assert ev["role"] == "desk" and ev["state"]["temp"] == 4000
+    await e.wait_idle()
+    assert bulbs["desk"].sets[-1][1] == st
+    assert bulbs["room"].sets == []
+    with pytest.raises(KeyError):
+        e.set_light("hall", on=True)
+
+
+async def test_set_light_keeps_brightness_of_known_base(eng, bulbs):
+    e, q = eng
+    job = e.trigger("low")
+    await until(q, ended(job))
+    await e.wait_idle()
+    assert e.set_light("desk", rgb=(0, 200, 100)) == LightState(on=True, dimming=80, rgb=(0, 200, 100))
+
+
+async def test_set_light_during_signal_wins_over_snapshot(eng, bulbs, clock):
+    e, q = eng
+    job = e.trigger("low")
+    await until(q, lambda ev: ev["type"] == "signal_start" and ev["job"] == job)
+    new = e.set_light("desk", rgb=(10, 20, 30))
+    clock.t += 60  # stale: the next signal would normally re-read the bulb
+    await until(q, ended(job))
+    await e.wait_idle()
+    assert bulbs["desk"].sets[-1][1] == new
+    reads = bulbs["desk"].reads
+    clock.t += 60
+    job2 = e.trigger("low")
+    await until(q, ended(job2))
+    await e.wait_idle()
+    assert bulbs["desk"].reads == reads + 1  # pin released once applied
+    assert bulbs["desk"].sets[-1][1] == new
+
+
+async def test_set_light_not_reread_before_applied(bulbs, clock):
+    e = make(bulbs, clock)
+    e.set_light("desk", temp=5000)
+    clock.t += 60
+    await e._apply_dirty()
+    assert bulbs["desk"].reads == 0
+    assert bulbs["desk"].sets[-1][1].temp == 5000
+
+
+async def test_set_light_under_on_air_keeps_overlay(eng, bulbs):
+    e, q = eng
+    e.set_mode("on_air", True)
+    await e.wait_idle()
+    e.set_light("room", temp=6500)
+    await e.wait_idle()
+    assert bulbs["room"].sets[-1][1].rgb == (255, 0, 0)
+    e.set_mode("on_air", False)
+    await e.wait_idle()
+    assert bulbs["room"].sets[-1][1] == LightState(on=True, dimming=50, temp=6500)
+
+
+async def test_set_light_not_clamped_in_quiet_hours(bulbs):
+    e = make(bulbs, Clock(NIGHT), quiet=("23:00", "08:00", 10))
+    task = asyncio.create_task(e.run())
+    try:
+        e.set_light("desk", bri=90, rgb=(255, 255, 255))
+        await e.wait_idle()
+        assert bulbs["desk"].sets[-1][1].dimming == 90
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task

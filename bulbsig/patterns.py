@@ -9,9 +9,10 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
-from .contracts import PRIORITY, LightState
+from .contracts import PRIORITY, SCENES, LightState
 
 ROLES = ("desk", "room")
+DEFAULT_FILE = Path(__file__).parent / "patterns_default.toml"
 REQUIRED_SIGNALS = (
     "dm", "mention", "vip", "backlog", "ringing",
     "meeting_t10", "meeting_t5", "meeting_t2", "meeting_t1", "meeting_t0", "meeting_overrun",
@@ -22,6 +23,7 @@ MIN_STEP_MS = 300
 DEFAULT_MAX_S = 30.0
 QUIET_POLICIES = ("dim", "skip", "once")
 STEP_KEYS = {"bulbs", "color", "temp", "off", "base", "bri", "ms", "ramp"}
+PRESET_KEYS = {"description", "color", "temp", "scene", "speed", "bri", "swatch"}
 PATTERN_KEYS = {"description", "priority", "swatch", "repeat", "max_s", "quiet", "allow_fast", "only_lit", "steps"}
 
 Repeat = int | Literal["until_ack"]
@@ -116,12 +118,37 @@ class Mode:
     looks: dict[str, Look] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class Preset:
+    """A resting colour the user can pick: exactly one of rgb / temp / scene."""
+    name: str
+    description: str
+    swatch: str
+    rgb: tuple[int, int, int] | None = None
+    temp: int | None = None
+    scene: int | None = None
+    speed: int | None = None
+    bri: int | None = None
+
+    def change(self) -> dict[str, Any]:
+        """Keyword arguments for Engine.set_light."""
+        d: dict[str, Any] = {"rgb": self.rgb, "temp": self.temp, "scene": self.scene,
+                             "speed": self.speed, "bri": self.bri}
+        return {k: v for k, v in d.items() if v is not None}
+
+    def to_json(self) -> dict[str, Any]:
+        return {"name": self.name, "description": self.description, "swatch": self.swatch,
+                "rgb": list(self.rgb) if self.rgb else None, "temp": self.temp, "scene": self.scene,
+                "speed": self.speed, "bri": self.bri}
+
+
 @dataclass
 class PatternSet:
     patterns: dict[str, Pattern]
     modes: dict[str, Mode]
     source: str = "<string>"
     notes: list[str] = field(default_factory=list)  # load-time warnings (unknown keys)
+    presets: dict[str, Preset] = field(default_factory=dict)
 
     def names(self) -> list[str]:
         return list(self.patterns)
@@ -142,6 +169,11 @@ class PatternSet:
                 out.append(f"warning: required mode {n!r} is missing")
         for p in self.patterns.values():
             out += _validate_pattern(p, min_step_ms)
+        for pr in self.presets.values():
+            if pr.bri is not None and not 10 <= pr.bri <= 100:
+                out.append(f"error: preset {pr.name}: bri {pr.bri} outside 10..100")
+            if pr.temp is not None and not 2200 <= pr.temp <= 6500:
+                out.append(f"warning: preset {pr.name}: temp {pr.temp} K outside the bulb range 2200..6500")
         for m in self.modes.values():
             for role, look in m.looks.items():
                 if role not in ROLES:
@@ -271,6 +303,33 @@ def _pattern(name: str, d: dict[str, Any], notes: list[str]) -> Pattern:
     )
 
 
+def scene_id(v: Any, where: str) -> int:
+    if isinstance(v, int) and not isinstance(v, bool) and v in SCENES.values():
+        return v
+    name = str(v).lower().replace(" ", "").replace("-", "")
+    if name not in SCENES:
+        raise PatternError(f"{where}: unknown scene {v!r}; try one of {', '.join(SCENES)}")
+    return SCENES[name]
+
+
+def _preset(name: str, d: dict[str, Any], notes: list[str]) -> Preset:
+    where = f"preset {name}"
+    for k in set(d) - PRESET_KEYS:
+        notes.append(f"warning: {where}: unknown key {k!r}")
+    if sum(k in d for k in ("color", "temp", "scene")) != 1:
+        raise PatternError(f"{where}: needs exactly one of color, temp or scene")
+    rgb = _hex(d["color"], where) if "color" in d else None
+    temp = int(d["temp"]) if "temp" in d else None
+    scene = scene_id(d["scene"], where) if "scene" in d else None
+    if "swatch" in d:
+        swatch = "#%02x%02x%02x" % _hex(d["swatch"], where)
+    else:
+        swatch = "#%02x%02x%02x" % (rgb or kelvin_rgb(temp or 2700))
+    return Preset(name=name, description=str(d.get("description", "")), swatch=swatch, rgb=rgb, temp=temp,
+                  scene=scene, speed=int(d["speed"]) if "speed" in d else None,
+                  bri=int(d["bri"]) if "bri" in d else None)
+
+
 def loads(text: str, source: str = "<string>") -> PatternSet:
     raw = tomllib.loads(text)
     notes: list[str] = []
@@ -279,7 +338,8 @@ def loads(text: str, source: str = "<string>") -> PatternSet:
     for n, d in raw.get("mode", {}).items():
         looks = {r: _look(v, f"mode {n}.{r}") for r, v in d.items() if isinstance(v, dict)}
         modes[n] = Mode(name=n, description=str(d.get("description", "")), looks=looks)
-    return PatternSet(pats, modes, source, notes)
+    presets = {n: _preset(n, d, notes) for n, d in raw.get("preset", {}).items()}
+    return PatternSet(pats, modes, source, notes, presets)
 
 
 def load(path: str | Path) -> PatternSet:
@@ -340,11 +400,13 @@ def main(argv: list[str] | None = None) -> int:
         for m in ps.modes.values():
             roles = ", ".join(m.looks)
             print(f"{'mode ' + m.name:16} {'':4} {'':10} {'':7}  {'':7}  {m.description} [{roles}]")
+        for pr in ps.presets.values():
+            print(f"{'preset ' + pr.name:16} {'':4} {'':10} {'':7}  {pr.swatch}  {pr.description}")
         return 0
     problems = ps.validate()
     for msg in problems:
         print(msg)
     errors = sum(m.startswith("error") for m in problems)
-    print(f"{ps.source}: {len(ps.patterns)} patterns, {len(ps.modes)} modes, "
+    print(f"{ps.source}: {len(ps.patterns)} patterns, {len(ps.modes)} modes, {len(ps.presets)} presets, "
           f"{errors} errors, {len(problems) - errors} warnings")
     return 1 if errors else 0

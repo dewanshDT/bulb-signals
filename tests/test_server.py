@@ -8,6 +8,8 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from bulbsig.config import PKG_DIR, Config
+from bulbsig.contracts import LightState
+from bulbsig.patterns import Preset
 from bulbsig.rules import Rules
 from bulbsig.server import DAEMON, build_app, is_loopback, split_listen
 
@@ -45,7 +47,13 @@ class StubEngine:
         self.calls.append(("mute", seconds))
 
     def snapshot(self):
-        return {"playing": None, "queue": [], "modes": [], "muted_until": None, "quiet": False, "bulbs": {}}
+        return {"playing": None, "queue": [], "modes": [], "muted_until": None, "quiet": False,
+                "bulbs": {"desk": {}, "room": {}}}
+
+    def set_light(self, role, **change):
+        self.calls.append(("light", (role, change)))
+        return LightState(on=change.get("on", True), dimming=change.get("bri"), temp=change.get("temp"),
+                          rgb=change.get("rgb"), scene=change.get("scene"), speed=change.get("speed"))
 
     def subscribe(self):
         q: asyncio.Queue = asyncio.Queue()
@@ -71,6 +79,9 @@ class P:
 @dataclass
 class Pats:
     items: dict = field(default_factory=lambda: {"dm": P("dm", "direct message", 50), "test": P("test")})
+    presets: dict = field(default_factory=lambda: {
+        "warm": Preset("warm", "Warm white", "#ffa757", temp=2700),
+        "fire": Preset("fire", "Fireplace", "#ff6a00", scene=5, bri=60)})
 
     def names(self):
         return list(self.items)
@@ -332,7 +343,7 @@ async def test_serve_lifecycle(monkeypatch, tmp_path):
         return {}
 
     fakes = {"wiz": types.SimpleNamespace(open_bulbs=open_bulbs),
-             "patterns": types.SimpleNamespace(load=lambda p: Pats()),
+             "patterns": types.SimpleNamespace(load=lambda p: Pats(), DEFAULT_FILE="default"),
              "engine": types.SimpleNamespace(Engine=lambda bulbs, pats, quiet: engine)}
     for name, mod in fakes.items():
         monkeypatch.setitem(sys.modules, f"bulbsig.{name}", mod)
@@ -374,3 +385,57 @@ async def test_calendar_push_schedules_meeting(env):
     _, again = await post(client, "/v1/notify", note)
     assert again["meeting"]["new"] is False
     assert not [c for c in engine.calls if c[0] == "trigger"]
+
+
+def lights(engine):
+    return [a for c, a in engine.calls if c == "light"]
+
+
+async def test_light(env):
+    client, engine, *_ = env
+    st, body = await post(client, "/v1/light", {"bulbs": "desk", "color": "#00ff80", "bri": 40})
+    assert st == 200 and body["bulbs"]["desk"]["rgb"] == [0, 255, 128]
+    assert lights(engine) == [("desk", {"rgb": (0, 255, 128), "bri": 40})]
+    st, body = await post(client, "/v1/light", {"preset": "fire"})
+    assert st == 200 and set(body["bulbs"]) == {"desk", "room"}
+    assert lights(engine)[-1] == ("room", {"scene": 5, "bri": 60})
+    st, _ = await post(client, "/v1/light", {"bulbs": ["room"], "preset": "warm", "bri": 30})
+    assert lights(engine)[-1] == ("room", {"temp": 2700, "bri": 30})
+    await post(client, "/v1/light", {"bulbs": "desk", "scene": "cozy", "speed": 80})
+    assert lights(engine)[-1] == ("desk", {"scene": 6, "speed": 80})
+    await post(client, "/v1/light", {"bulbs": "desk", "on": False})
+    assert lights(engine)[-1] == ("desk", {"on": False})
+
+
+@pytest.mark.parametrize("body,status", [
+    ({}, 400),
+    ({"color": "ff0000", "temp": 3000}, 400),
+    ({"color": "red"}, 400),
+    ({"temp": 9000}, 400),
+    ({"bri": 5}, 400),
+    ({"bri": True}, 400),
+    ({"on": "yes"}, 400),
+    ({"scene": "nope"}, 400),
+    ({"preset": "nope"}, 404),
+    ({"preset": ["warm"]}, 404),
+    ({"bulbs": "hall", "on": True}, 404),
+    ({"bulbs": 3, "on": True}, 400),
+])
+async def test_light_rejects(env, body, status):
+    client, engine, *_ = env
+    st, out = await post(client, "/v1/light", body)
+    assert st == status and "error" in out
+    assert lights(engine) == []
+
+
+async def test_light_needs_token(env):
+    client, *_ = env
+    st, _ = await post(client, "/v1/light", {"on": True}, headers={})
+    assert st == 401
+
+
+async def test_presets_route(env):
+    client, *_ = env
+    r = await client.get("/v1/presets", headers=AUTH)
+    names = [p["name"] for p in await r.json()]
+    assert names == ["warm", "fire"]

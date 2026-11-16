@@ -72,6 +72,19 @@ class LightState:
         )
 
 
+# WiZ sceneId by name.
+SCENES = {
+    "ocean": 1, "romance": 2, "sunset": 3, "party": 4, "fireplace": 5,
+    "cozy": 6, "forest": 7, "pastel": 8, "wakeup": 9, "bedtime": 10,
+    "warmwhite": 11, "daylight": 12, "coolwhite": 13, "nightlight": 14,
+    "focus": 15, "relax": 16, "truecolors": 17, "tvtime": 18,
+    "plantgrowth": 19, "spring": 20, "summer": 21, "fall": 22,
+    "deepdive": 23, "jungle": 24, "mojito": 25, "club": 26,
+    "christmas": 27, "halloween": 28, "candlelight": 29,
+    "goldenwhite": 30, "pulse": 31, "steampunk": 32,
+}
+
+
 class Bulb(Protocol):
     """One physical bulb, addressed by role ("desk", "room")."""
     role: str
@@ -117,6 +130,10 @@ class EngineAPI(Protocol):
         """Mute all signals for N seconds; None or 0 unmutes."""
         ...
 
+    def set_light(self, role: str, **change: Any) -> LightState:
+        """Change a bulb's resting state (on, bri, rgb, temp, scene, speed). KeyError for an unknown role."""
+        ...
+
     def snapshot(self) -> dict[str, Any]:
         """JSON-safe state for GET /v1/state (see ENGINE_SNAPSHOT_KEYS)."""
         ...
@@ -146,6 +163,7 @@ EVENT_TYPES = (
     "mode",           # {"type", "mode", "active"}
     "mute",           # {"type", "until"}
     "bulb_error",     # {"type", "role", "error"}
+    "light",          # {"type", "role", "state": LightState-as-dict}  resting state set via set_light
     "meeting",        # {"type", "phase": "t10"|"t5"|"t2"|"t1"|"t0"|"end"|"overrun", "title", "start", "end"}
 )
 

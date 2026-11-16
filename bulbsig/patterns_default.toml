@@ -198,3 +198,58 @@ steps = [
 [mode.on_air]
 description = "On air: the room bulb holds a dim red"
 room = { color = "ff0000", bri = 10 }
+
+# Presets: resting colours picked from the TUI (l) or `POST /v1/light {"preset": ...}`.
+# [preset.<name>]  description, exactly one of color = "rrggbb" | temp = K | scene = name,
+#                  speed (scenes, 10..200), bri (10..100; omitted keeps the bulb's brightness), swatch
+[preset.warm]
+description = "Warm white"
+temp = 2700
+
+[preset.neutral]
+description = "Neutral white"
+temp = 4000
+
+[preset.daylight]
+description = "Daylight"
+temp = 6500
+
+[preset.amber]
+description = "Amber"
+color = "ff8a1f"
+
+[preset.rose]
+description = "Rose"
+color = "ff4d6d"
+
+[preset.teal]
+description = "Teal"
+color = "00c2a8"
+
+[preset.blue]
+description = "Deep blue"
+color = "1f4dff"
+
+[preset.violet]
+description = "Violet"
+color = "8a3cff"
+
+[preset.fireplace]
+description = "Fireplace scene"
+scene = "fireplace"
+swatch = "ff6a00"
+
+[preset.cozy]
+description = "Cozy scene"
+scene = "cozy"
+swatch = "ffa040"
+
+[preset.focus]
+description = "Focus scene"
+scene = "focus"
+swatch = "e6f0ff"
+
+[preset.nightlight]
+description = "Night light"
+scene = "nightlight"
+swatch = "ff7a30"

@@ -20,6 +20,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
+from textual.screen import ModalScreen
 from textual.widgets import Footer, Input, OptionList, RichLog, Static
 from textual.widgets.option_list import Option
 
@@ -112,6 +113,15 @@ class DaemonClient:
         d = await self._req("GET", "/v1/patterns")
         return [p for p in d if isinstance(p, dict)] if isinstance(d, list) else []
 
+    async def get_presets(self) -> list[dict[str, Any]]:
+        try:
+            d = await self._req("GET", "/v1/presets")
+        except aiohttp.ClientResponseError as e:
+            if e.status == 404:  # daemon older than presets
+                return []
+            raise
+        return [p for p in d if isinstance(p, dict)] if isinstance(d, list) else []
+
     async def post(self, path: str, body: dict[str, Any]) -> Any:
         return await self._req("POST", path, body)
 
@@ -196,6 +206,197 @@ def _dur(secs: float) -> str:
     return f"{h}h{m:02d}m" if h else f"{m}m{s:02d}s"
 
 
+def match_preset(s: dict[str, Any], presets: list[dict[str, Any]]) -> str | None:
+    """The name of the preset a bulb state shows, if any."""
+    for p in presets:
+        if p.get("bri") is not None and s.get("dimming") != p.get("bri"):
+            continue
+        if p.get("scene"):
+            hit = s.get("scene") == p.get("scene")
+        elif p.get("rgb"):
+            hit = list(s.get("rgb") or []) == list(p["rgb"])
+        elif p.get("temp"):
+            hit = not s.get("rgb") and not s.get("scene") and s.get("temp") is not None \
+                and abs(float(s["temp"]) - float(p["temp"])) <= 50
+        else:
+            hit = False
+        if hit:
+            return str(p.get("name"))
+    return None
+
+
+TARGETS = ("desk", "room", "all")
+
+
+class LightScreen(ModalScreen[None]):
+    """Pick a bulb's resting colour. Enter applies; nothing changes while browsing."""
+
+    CSS = f"""
+    LightScreen {{ align: center middle; background: #000000 50%; }}
+    #light {{ width: 60; height: auto; max-height: 90%; background: {PANEL}; border: round {ACCENT};
+        border-title-color: {ACCENT}; border-title-style: bold; padding: 0 1; }}
+    #light-head {{ height: auto; margin: 0 0 1 0; }}
+    #light-presets {{ height: auto; max-height: 20; background: {PANEL}; border: none; }}
+    #light-presets > .option-list--option-highlighted {{ background: #253042; }}
+    #light-hex {{ display: none; background: {PANEL}; border: round {EDGE}; }}
+    #light-hex.shown {{ display: block; }}
+    #light-help {{ color: {DIM}; height: auto; margin: 1 0 0 0; }}
+    """
+
+    BINDINGS = [
+        Binding("tab", "target", "Bulb", priority=True),
+        Binding("left", "bri(-10)", "Dimmer"),
+        Binding("right", "bri(10)", "Brighter"),
+        Binding("t", "toggle", "On/off"),
+        Binding("c", "custom", "Custom"),
+        Binding("escape", "close", "Close"),
+        Binding("l", "close", "Close", show=False),
+    ]
+
+    def __init__(self, presets: list[dict[str, Any]], state: dict[str, Any], target: str = "all",
+                 debounce_s: float = 0.2) -> None:
+        super().__init__()
+        self.presets = presets
+        self.state = state
+        self.target = target
+        self.debounce_s = debounce_s
+        self.bri = self._target_bri()
+        self._bri_timer: Any = None
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="light"):
+            yield Static(id="light-head")
+            yield OptionList(id="light-presets")
+            yield Input(placeholder="rrggbb — enter to apply, esc to cancel", id="light-hex")
+            yield Static("enter apply · tab bulb · ←/→ bri · t on/off · c hex · esc close",
+                         id="light-help")
+
+    def on_mount(self) -> None:
+        self.query_one("#light").border_title = "Light"
+        opts = []
+        for p in self.presets:
+            prompt = Text.assemble(("███ ", _hex(p.get("swatch"))), (str(p.get("name") or "?"), f"bold {FG}"))
+            if p.get("description"):
+                prompt.append(f"  {p.get('description')}", DIM)
+            opts.append(Option(prompt, id=str(p.get("name"))))
+        ol = self.query_one("#light-presets", OptionList)
+        ol.set_options(opts)
+        if opts:
+            ol.highlighted = 0
+        ol.focus()
+        self.render_head()
+
+    def _roles(self) -> list[str]:
+        bulbs = sorted(_d(self.state.get("bulbs")))
+        return bulbs if self.target == "all" else [self.target]
+
+    def _states(self) -> list[dict[str, Any]]:
+        bulbs = _d(self.state.get("bulbs"))
+        return [_d(_d(bulbs.get(r)).get("state")) for r in self._roles()]
+
+    def _target_bri(self) -> int:
+        for s in self._states():
+            if s.get("on") and isinstance(s.get("dimming"), (int, float)):
+                return int(s["dimming"])
+        return 100
+
+    def update_state(self, state: dict[str, Any]) -> None:
+        self.state = state
+        self.render_head()
+
+    def render_head(self) -> None:
+        t = Text()
+        for name in TARGETS:
+            t.append(f" {name} ", f"bold {BG} on {ACCENT}" if name == self.target else DIM)
+            t.append(" ")
+        t.append(f"   bri {self.bri}%", FG)
+        for r, s in zip(self._roles(), self._states()):
+            t.append(f"\n{r:<5} ", f"bold {FG}")
+            if not s:
+                t.append("unknown", DIM)
+            elif not s.get("on"):
+                t.append("off", DIM)
+            else:
+                t.append(match_preset(s, self.presets) or _describe(s), FG)
+                if s.get("dimming") is not None:
+                    t.append(f"  {s.get('dimming')}%", DIM)
+        self.query_one("#light-head", Static).update(t)
+
+    def _apply(self, body: dict[str, Any], ok: str) -> None:
+        self.app._send("/v1/light", {"bulbs": self.target, **body}, f"{self.target}: {ok}")  # type: ignore[attr-defined]
+
+    @on(OptionList.OptionSelected, "#light-presets")
+    def _picked(self, ev: OptionList.OptionSelected) -> None:
+        ev.stop()
+        if ev.option.id:
+            self._apply({"preset": ev.option.id}, ev.option.id)
+
+    def action_target(self) -> None:
+        self.target = TARGETS[(TARGETS.index(self.target) + 1) % len(TARGETS)]
+        self.bri = self._target_bri()
+        self.render_head()
+
+    def action_bri(self, step: int) -> None:
+        self.bri = max(10, min(100, self.bri + step))
+        self.render_head()
+        if self._bri_timer is not None:
+            self._bri_timer.stop()
+        self._bri_timer = self.set_timer(self.debounce_s, self._send_bri)
+
+    def _send_bri(self) -> None:
+        self._bri_timer = None
+        self._apply({"bri": self.bri}, f"{self.bri}%")
+
+    def action_toggle(self) -> None:
+        on = not any(s.get("on") for s in self._states())
+        self._apply({"on": on}, "on" if on else "off")
+
+    def action_custom(self) -> None:
+        inp = self.query_one("#light-hex", Input)
+        inp.add_class("shown")
+        inp.focus()
+
+    @on(Input.Submitted, "#light-hex")
+    def _hex_submitted(self, ev: Input.Submitted) -> None:
+        ev.stop()
+        h = ev.value.strip().lstrip("#")
+        if _hex(h, "") == "":
+            self.app.notify(f"not a colour: {ev.value!r}; want rrggbb", severity="error", timeout=3)
+            return
+        self._apply({"color": h.lower()}, f"#{h.lower()}")
+        self._hide_hex()
+
+    def _hide_hex(self) -> None:
+        inp = self.query_one("#light-hex", Input)
+        inp.value = ""
+        inp.remove_class("shown")
+        self.query_one("#light-presets", OptionList).focus()
+
+    def action_close(self) -> None:
+        inp = self.query_one("#light-hex", Input)
+        if inp.has_class("shown"):
+            self._hide_hex()
+            return
+        if self._bri_timer is not None:
+            self._bri_timer.stop()
+            self._send_bri()
+        self.dismiss()
+
+
+def _describe(s: dict[str, Any]) -> str:
+    if s.get("scene"):
+        return f"scene {s.get('scene')}"
+    rgb = s.get("rgb")
+    if isinstance(rgb, list) and len(rgb) == 3:
+        try:
+            return "#%02x%02x%02x" % tuple(max(0, min(255, int(c))) for c in rgb)
+        except (TypeError, ValueError):
+            return "rgb"
+    if s.get("temp"):
+        return f"{s.get('temp')}K"
+    return "on"
+
+
 @dataclass
 class FeedEntry:
     app: str
@@ -233,6 +434,7 @@ class BulbTUI(App[int]):
         Binding("m", "mute", "Mute"),
         Binding("o", "on_air", "On air"),
         Binding("f", "focus_mode", "Focus"),
+        Binding("l", "light", "Light"),
         Binding("r", "refresh", "Refresh"),
         Binding("slash", "filter", "Filter"),
         Binding("escape", "clear_filter", "Clear filter", show=False),
@@ -248,6 +450,7 @@ class BulbTUI(App[int]):
         self.poll_s = poll_s
         self.state: dict[str, Any] = {}
         self.patterns: list[dict[str, Any]] = []
+        self.presets: list[dict[str, Any]] = []
         self.swatches: dict[str, str] = {}
         self.status = "connecting"
         self.status_detail = ""
@@ -285,9 +488,11 @@ class BulbTUI(App[int]):
     # ---- networking ----
 
     async def _load(self) -> None:
-        state, patterns = await asyncio.gather(self.client.get_state(), self.client.get_patterns())
+        state, patterns, presets = await asyncio.gather(
+            self.client.get_state(), self.client.get_patterns(), self.client.get_presets())
         self.state = state
         self.patterns = patterns
+        self.presets = presets
         self.swatches = {str(p.get("name")): _hex(p.get("swatch")) for p in patterns}
         self._mute_step = 1 if self._muted() else 0
         self.feed.clear()
@@ -400,6 +605,11 @@ class BulbTUI(App[int]):
             line = Text.assemble((f"{_clock(time.time())}  ", DIM), ("⚠ ", BAD),
                                  (f"{role} bulb: {d.get('error') or 'error'}", BAD))
             self._add_line(role, f"bulb {role} {d.get('error')}", line)
+        elif etype == "light":
+            b = _d(_d(st.get("bulbs")).get(str(d.get("role") or "")))
+            if b and isinstance(d.get("state"), dict):
+                b["state"] = d["state"]
+            self.set_timer(1.5, self._poll)
         elif etype == "meeting":
             title = str(d.get("title") or "meeting")
             for m in _l(st.get("meetings")):
@@ -526,6 +736,7 @@ class BulbTUI(App[int]):
             t.append("● " if reach else "○ ", OK if reach else BAD)
             t.append(f"{role:<5} ", f"bold {FG}")
             rgb = s.get("rgb")
+            pname = match_preset(s, self.presets) if s.get("on") else None
             if not s.get("on"):
                 t.append("██", "#2b2f36")
                 t.append(" off      ", DIM)
@@ -533,17 +744,17 @@ class BulbTUI(App[int]):
                 try:
                     r, g, bl = (max(0, min(255, int(c))) for c in rgb)
                     t.append("██", f"#{r:02x}{g:02x}{bl:02x}")
-                    t.append(f" rgb      ", DIM)
+                    t.append(f" {(pname or 'rgb')[:9]:<9}", DIM)
                 except (TypeError, ValueError):
                     t.append("██ ?        ", DIM)
             elif s.get("scene"):
                 t.append("▚▚", ACCENT)
-                t.append(f" scene {s.get('scene'):<3}", DIM)
+                t.append(f" {(pname or 'scene ' + str(s.get('scene')))[:9]:<9}", DIM)
             elif s.get("temp"):
                 try:
                     r, g, bl = kelvin_rgb(float(s["temp"]))
                     t.append("██", f"#{r:02x}{g:02x}{bl:02x}")
-                    t.append(f" {int(s['temp'])}K    ", DIM)
+                    t.append(f" {(pname or str(int(s['temp'])) + 'K')[:9]:<9}", DIM)
                 except (TypeError, ValueError):
                     t.append("██ ?        ", DIM)
             else:
@@ -606,6 +817,8 @@ class BulbTUI(App[int]):
         self.render_now()
         self.render_bulbs()
         self.render_meetings()
+        if isinstance(self.screen, LightScreen):
+            self.screen.update_state(self.state)
 
     def _tick(self) -> None:
         self.render_topbar()
@@ -648,6 +861,18 @@ class BulbTUI(App[int]):
     def action_focus_mode(self) -> None:
         active = not self.state.get("focus")
         self._send("/v1/mode", {"mode": "focus", "active": active}, f"focus {'on' if active else 'off'}")
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        # these act on main-screen widgets, which a modal hides
+        if action in ("play", "filter", "clear_filter", "light") and isinstance(self.screen, ModalScreen):
+            return False
+        return True
+
+    def action_light(self) -> None:
+        if not self.presets and not _d(self.state.get("bulbs")):
+            self.notify("no bulbs yet", timeout=2)
+            return
+        self.push_screen(LightScreen(self.presets, self.state))
 
     def action_refresh(self) -> None:
         if self.status == "auth":

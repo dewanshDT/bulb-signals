@@ -9,7 +9,9 @@
   bulbsig bulbs scene fireplace [speed]  see `bulbsig bulbs scenes`
   bulbsig bulbs raw '{"method":"getPilot","params":{}}'
 
-Add -t <role|mac|ip|all> to target bulbs (default: all).
+Add -t <role|mac|ip|all> to target bulbs (default: all). While the daemon is
+running, on/off/toggle/bri/temp/color/scene on a role or all go through it, so
+the next signal restores to the new state; --direct talks to the bulbs instead.
 """
 from __future__ import annotations
 
@@ -27,21 +29,11 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from . import config as config_mod
-from .contracts import BulbUnreachable, LightState
+from .contracts import SCENES, BulbUnreachable, LightState
 
 PORT = 38899
 CACHE = Path.home() / ".config" / "bulbsig" / "bulbs-cache.json"
 
-SCENES = {
-    "ocean": 1, "romance": 2, "sunset": 3, "party": 4, "fireplace": 5,
-    "cozy": 6, "forest": 7, "pastel": 8, "wakeup": 9, "bedtime": 10,
-    "warmwhite": 11, "daylight": 12, "coolwhite": 13, "nightlight": 14,
-    "focus": 15, "relax": 16, "truecolors": 17, "tvtime": 18,
-    "plantgrowth": 19, "spring": 20, "summer": 21, "fall": 22,
-    "deepdive": 23, "jungle": 24, "mojito": 25, "club": 26,
-    "christmas": 27, "halloween": 28, "candlelight": 29,
-    "goldenwhite": 30, "pulse": 31, "steampunk": 32,
-}
 
 Msg = dict[str, Any]
 
@@ -398,6 +390,72 @@ def parse_state(cmd: str, args: list[str]) -> LightState:
     raise ValueError(f"unknown command {cmd!r}; see --help")
 
 
+LIGHT_CMDS = ("on", "off", "toggle", "bri", "temp", "color", "scene")
+
+
+def light_body(cmd: str, args: list[str]) -> dict[str, Any]:
+    """A `bulbs <cmd>` as a /v1/light body (toggle excluded)."""
+    st = parse_state(cmd, args)
+    if cmd in ("on", "off"):
+        return {"on": st.on}
+    if cmd == "bri":
+        return {"bri": st.dimming}
+    if cmd == "temp":
+        return {"temp": st.temp}
+    if cmd == "color":
+        body: dict[str, Any] = {"color": "%02x%02x%02x" % st.rgb}  # type: ignore[str-format]
+        if st.dimming is not None:
+            body["bri"] = _clamp(st.dimming, 10, 100)
+        return body
+    body = {"scene": st.scene}
+    if st.speed is not None:
+        body["speed"] = st.speed
+    return body
+
+
+def _daemon(cfg: config_mod.Config, method: str, path: str, body: Any = None, timeout: float = 5) -> Any:
+    import urllib.request
+    req = urllib.request.Request(cfg.url.rstrip("/") + path, method=method,
+                                 data=None if body is None else json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json",
+                                          **({"Authorization": f"Bearer {cfg.token}"} if cfg.token else {})})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read() or b"{}")
+
+
+def daemon_up(cfg: config_mod.Config) -> bool:
+    try:
+        return bool(_daemon(cfg, "GET", "/v1/health", timeout=0.5).get("ok"))
+    except Exception:
+        return False
+
+
+def via_daemon(cfg: config_mod.Config, cmd: str, args: list[str], target: str) -> int:
+    import urllib.error
+    try:
+        if cmd == "toggle":
+            bulbs = _daemon(cfg, "GET", "/v1/state").get("bulbs", {})
+            roles = list(bulbs) if target == "all" else [target]
+            body: dict[str, Any] = {"on": not any((bulbs.get(r, {}).get("state") or {}).get("on") for r in roles)}
+        else:
+            body = light_body(cmd, args)
+        res = _daemon(cfg, "POST", "/v1/light", {"bulbs": target, **body})
+    except urllib.error.HTTPError as e:
+        try:
+            msg = json.loads(e.read()).get("error", e.reason)
+        except ValueError:
+            msg = e.reason
+        print(f"daemon: {msg}", file=sys.stderr)
+        return 1
+    except OSError as e:
+        print(f"daemon at {cfg.url}: {e}", file=sys.stderr)
+        return 1
+    for role, st in res.get("bulbs", {}).items():
+        print(f"{role:8} {describe(LightState(**{**st, 'rgb': tuple(st['rgb']) if st.get('rgb') else None}))}"
+              "  (via daemon)")
+    return 0
+
+
 async def _cli(a: argparse.Namespace, cfg: config_mod.Config) -> int:
     if a.cmd == "discover":
         found = await discover(cfg.subnets or None)
@@ -435,6 +493,7 @@ def main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(prog="bulbsig bulbs", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("-t", "--target", default="all", help="role, mac, ip or all (default: all)")
+    p.add_argument("--direct", action="store_true", help="talk to the bulbs even if the daemon is running")
     p.add_argument("cmd")
     p.add_argument("args", nargs="*")
     a = p.parse_args(argv)
@@ -442,7 +501,12 @@ def main(argv: list[str]) -> int:
         print("\n".join(SCENES))
         return 0
     try:
-        return asyncio.run(_cli(a, config_mod.load()))
+        cfg = config_mod.load()
+        roles = {b.role for b in cfg.bulbs}
+        if (a.cmd in LIGHT_CMDS and not a.direct and (a.target == "all" or a.target in roles)
+                and daemon_up(cfg)):
+            return via_daemon(cfg, a.cmd, a.args, a.target)
+        return asyncio.run(_cli(a, cfg))
     except (ValueError, IndexError, KeyError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2

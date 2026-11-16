@@ -61,12 +61,43 @@ yourself:
 ```sh
 bulbsig bulbs discover | status | on | off | color ff8800 | temp 2700 | scene fireplace   [-t desk|room|all]
 bulbsig daemon                     # engine + rules + calendar + HTTP API
-bulbsig tui                        # dashboard: space ack · p play · m mute · o ON AIR · f focus · / filter
+bulbsig tui                        # dashboard: space ack · p play · m mute · o ON AIR · f focus · l light · / filter
 bulbsig preview dm mention         # play signals directly (daemon must be stopped) or --via-daemon
 bulbsig patterns list | validate
 bulbsig rules test --app com.tinyspeck.slackmacgap --title Alice --body "hi"
 bulbsig calendar --hours 24
 ```
+
+`bulbs on|off|toggle|bri|temp|color|scene` on a role or `all` go through the
+daemon while it is running, so the next signal comes back to the new colour
+instead of the old one. `--direct` skips the daemon.
+
+## Resting colour
+
+Press `l` in the TUI to set the colour a bulb rests at (and returns to after
+every signal) without the WiZ or Google Home app:
+
+| key | does |
+|---|---|
+| `↑/↓`, `enter` | pick a preset and apply it (moving through the list changes nothing) |
+| `tab` | target desk → room → all |
+| `←/→` | brightness ±10 % |
+| `t` | on/off |
+| `c` | type any `rrggbb` colour |
+| `esc` | close |
+
+Or over HTTP:
+
+```sh
+curl -H "Authorization: Bearer $TOKEN" -d '{"bulbs":"desk","preset":"amber","bri":50}' http://127.0.0.1:8766/v1/light
+curl -H "Authorization: Bearer $TOKEN" -d '{"bulbs":"all","temp":2700}' http://127.0.0.1:8766/v1/light
+```
+
+`bulbs` is a role, a list of roles or `all`. Give at most one of `preset`,
+`color`, `temp` or `scene` (with optional `speed`), plus `bri` and/or `on`.
+During ON AIR the room keeps its red and shows the new colour when ON AIR ends.
+A colour changed in the phone app while a signal is playing or during ON AIR
+is put back when it ends; change it here instead.
 
 Anything can raise a signal:
 
@@ -111,6 +142,9 @@ LAN address and set a token. Point the Mac sensor at it with `[daemon] url`.
 
 ## Customising
 
+- **Presets** (the `l` panel) are `[preset.<name>]` tables in the same file:
+  exactly one of `color`, `temp` or `scene`, plus optional `bri`, `speed`,
+  `swatch`. A patterns file with no presets gets the default ones.
 - **Signals:** `bulbsig/patterns_default.toml`. Copy it and set
   `patterns_file = "..."` in config. Run `bulbsig patterns validate`.
 - **Rules:** `bulbsig/rules_default.toml`, overridden with

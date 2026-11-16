@@ -119,3 +119,33 @@ def test_cli_list_and_validate(capsys, tmp_path):
     assert patterns.main(["validate", str(bad)]) == 1
     bad.write_text("[pattern.x\n")
     assert patterns.main(["validate", str(bad)]) == 1
+
+
+def test_presets_parse_and_validate():
+    ps = patterns.loads("""
+[preset.warm]
+temp = 2700
+[preset.red]
+color = "ff0000"
+bri = 40
+[preset.fire]
+scene = "Fireplace"
+speed = 120
+swatch = "ff6a00"
+""")
+    assert list(ps.presets) == ["warm", "red", "fire"]
+    assert ps.presets["red"].change() == {"rgb": (255, 0, 0), "bri": 40}
+    assert ps.presets["fire"].change() == {"scene": 5, "speed": 120}
+    assert ps.presets["fire"].swatch == "#ff6a00"
+    assert ps.presets["warm"].swatch.startswith("#ff")
+    with pytest.raises(patterns.PatternError):
+        patterns.loads('[preset.x]\ncolor = "ff0000"\ntemp = 3000\n')
+    with pytest.raises(patterns.PatternError):
+        patterns.loads('[preset.x]\nscene = "nope"\n')
+    assert any("bri" in m for m in patterns.loads('[preset.x]\ntemp = 3000\nbri = 5\n').validate())
+
+
+def test_default_presets():
+    ps = patterns.load(patterns.DEFAULT_FILE)
+    assert {"warm", "neutral", "daylight", "fireplace"} <= set(ps.presets)
+    assert not [m for m in ps.validate() if "preset" in m]

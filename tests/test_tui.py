@@ -12,7 +12,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 from textual.widgets import OptionList, RichLog, Static
 
-from bulbsig.tui import BulbTUI, DaemonClient, SSEParser
+from bulbsig.tui import BulbTUI, DaemonClient, LightScreen, SSEParser, match_preset
 
 TOKEN = "s3cret"
 SCREENSHOT = Path("/tmp/claude-960/-var-lib-storm-runtime-workspaces-scratch/"
@@ -66,6 +66,13 @@ class FakeDaemon:
              "swatch": "f2a33a", "repeat": "until_ack"},
         ]
 
+    presets: list[dict[str, Any]] | None = [
+        {"name": "warm", "description": "Warm white", "swatch": "#ffa757", "rgb": None, "temp": 2700,
+         "scene": None, "speed": None, "bri": None},
+        {"name": "violet", "description": "Violet", "swatch": "#5a3cdc", "rgb": [90, 60, 220], "temp": None,
+         "scene": None, "speed": None, "bri": None},
+    ]
+
     def make_app(self) -> web.Application:
         @web.middleware
         async def auth(req: web.Request, handler):
@@ -109,7 +116,11 @@ class FakeDaemon:
             return web.json_response({"ok": True, "version": "t"})
 
         app.router.add_get("/v1/health", health)
-        for p in ("notify", "signal", "ack", "mode", "mute", "heartbeat"):
+        if self.presets is not None:
+            async def presets(_: web.Request) -> web.Response:
+                return web.json_response(self.presets)
+            app.router.add_get("/v1/presets", presets)
+        for p in ("notify", "signal", "ack", "mode", "mute", "heartbeat", "light"):
             app.router.add_post(f"/v1/{p}", post)
         return app
 
@@ -165,7 +176,7 @@ async def test_initial_state_renders(daemon: FakeDaemon) -> None:
         await connected(app, daemon)
         await pilot.pause()
         bulbs = text_of(app, "#bulbs")
-        assert "desk" in bulbs and "192.168.1.40" in bulbs and "60%" in bulbs and "2700K" in bulbs
+        assert "desk" in bulbs and "192.168.1.40" in bulbs and "60%" in bulbs and "warm" in bulbs
         meetings = text_of(app, "#meetings")
         assert "Design sync" in meetings and "1:1 with Priya" in meetings
         assert "mention" in text_of(app, "#now") and "dm" in text_of(app, "#now")
@@ -305,3 +316,70 @@ def test_sse_parser_split_multibyte() -> None:
     for b in raw:
         got += p.feed(bytes([b]))
     assert got == [("message", '{"t": "caf\u00e9 \u2603"}')]
+
+
+def lights(fd: FakeDaemon) -> list[dict[str, Any]]:
+    return [b for p, b in fd.posts if p == "/v1/light"]
+
+
+async def test_bulbs_panel_names_preset(daemon: FakeDaemon) -> None:
+    app = make_tui(daemon)
+    async with app.run_test(size=(150, 42)) as pilot:
+        await connected(app, daemon)
+        await pilot.pause()
+        bulbs = text_of(app, "#bulbs")
+        assert "violet" in bulbs and "warm" in bulbs
+
+
+async def test_light_panel(daemon: FakeDaemon) -> None:
+    app = make_tui(daemon)
+    async with app.run_test(size=(150, 42)) as pilot:
+        await connected(app, daemon)
+        await pilot.press("l")
+        await until(lambda: isinstance(app.screen, LightScreen))
+        scr = app.screen
+        assert scr.bri == 60
+        await pilot.press("down")
+        await pilot.pause(0.3)
+        assert lights(daemon) == []  # browsing does not apply
+        await pilot.press("enter")
+        await until(lambda: lights(daemon) == [{"bulbs": "all", "preset": "violet"}])
+        await pilot.press("tab")
+        assert scr.target == "desk"
+        await pilot.press("right", "right", "right")
+        await until(lambda: len(lights(daemon)) == 2)
+        assert lights(daemon)[-1] == {"bulbs": "desk", "bri": 90}
+        await pilot.press("t")
+        await until(lambda: lights(daemon)[-1] == {"bulbs": "desk", "on": False})
+        await pilot.press("c", "0", "0", "f", "f", "8", "0", "enter")
+        await until(lambda: lights(daemon)[-1] == {"bulbs": "desk", "color": "00ff80"})
+        await pilot.press("c", "z", "enter")
+        await pilot.pause()
+        assert lights(daemon)[-1] == {"bulbs": "desk", "color": "00ff80"}
+        await pilot.press("escape", "p", "slash")  # main-screen keys are ignored while the panel is open
+        await pilot.pause()
+        assert isinstance(app.screen, LightScreen)
+        await pilot.press("escape")
+        await until(lambda: not isinstance(app.screen, LightScreen))
+
+
+async def test_light_panel_old_daemon(daemon: FakeDaemon) -> None:
+    daemon.presets = None
+    await daemon.server.close()
+    srv = TestServer(daemon.make_app())
+    await srv.start_server()
+    daemon.server = srv
+    app = make_tui(daemon)
+    async with app.run_test(size=(150, 42)) as pilot:
+        await connected(app, daemon)
+        assert app.presets == []
+        await pilot.press("l", "t")
+        await until(lambda: lights(daemon) == [{"bulbs": "all", "on": False}])
+
+
+def test_match_preset() -> None:
+    presets = FakeDaemon.presets
+    assert match_preset({"on": True, "temp": 2720}, presets) == "warm"
+    assert match_preset({"on": True, "temp": 3500}, presets) is None
+    assert match_preset({"on": True, "rgb": [90, 60, 220]}, presets) == "violet"
+    assert match_preset({"on": True, "scene": 5}, [{"name": "fire", "scene": 5, "bri": 60}]) is None
