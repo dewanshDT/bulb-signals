@@ -413,7 +413,7 @@ def light_body(cmd: str, args: list[str]) -> dict[str, Any]:
     return body
 
 
-def _daemon(cfg: config_mod.Config, method: str, path: str, body: Any = None, timeout: float = 5) -> Any:
+def daemon_request(cfg: config_mod.Config, method: str, path: str, body: Any = None, timeout: float = 5) -> Any:
     import urllib.request
     req = urllib.request.Request(cfg.url.rstrip("/") + path, method=method,
                                  data=None if body is None else json.dumps(body).encode(),
@@ -425,7 +425,7 @@ def _daemon(cfg: config_mod.Config, method: str, path: str, body: Any = None, ti
 
 def daemon_up(cfg: config_mod.Config) -> bool:
     try:
-        return bool(_daemon(cfg, "GET", "/v1/health", timeout=0.5).get("ok"))
+        return bool(daemon_request(cfg, "GET", "/v1/health", timeout=0.5).get("ok"))
     except Exception:
         return False
 
@@ -434,12 +434,12 @@ def via_daemon(cfg: config_mod.Config, cmd: str, args: list[str], target: str) -
     import urllib.error
     try:
         if cmd == "toggle":
-            bulbs = _daemon(cfg, "GET", "/v1/state").get("bulbs", {})
+            bulbs = daemon_request(cfg, "GET", "/v1/state").get("bulbs", {})
             roles = list(bulbs) if target == "all" else [target]
             body: dict[str, Any] = {"on": not any((bulbs.get(r, {}).get("state") or {}).get("on") for r in roles)}
         else:
             body = light_body(cmd, args)
-        res = _daemon(cfg, "POST", "/v1/light", {"bulbs": target, **body})
+        res = daemon_request(cfg, "POST", "/v1/light", {"bulbs": target, **body})
     except urllib.error.HTTPError as e:
         try:
             msg = json.loads(e.read()).get("error", e.reason)

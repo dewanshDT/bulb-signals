@@ -134,6 +134,10 @@ class EngineAPI(Protocol):
         """Change a bulb's resting state (on, bri, rgb, temp, scene, speed). KeyError for an unknown role."""
         ...
 
+    async def current_bases(self) -> dict[str, LightState]:
+        """Each known bulb's resting state (no signal, no mode overlay), re-read if stale and idle."""
+        ...
+
     def snapshot(self) -> dict[str, Any]:
         """JSON-safe state for GET /v1/state (see ENGINE_SNAPSHOT_KEYS)."""
         ...
@@ -164,6 +168,7 @@ EVENT_TYPES = (
     "mute",           # {"type", "until"}
     "bulb_error",     # {"type", "role", "error"}
     "light",          # {"type", "role", "state": LightState-as-dict}  resting state set via set_light
+    "scenes",         # {"type", "change": "saved"|"deleted", "name"}  daemon-side; re-fetch GET /v1/scenes
     "meeting",        # {"type", "phase": "t10"|"t5"|"t2"|"t1"|"t0"|"end"|"overrun", "title", "start", "end"}
 )
 

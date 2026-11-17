@@ -44,7 +44,8 @@ def is_loopback(host: str) -> bool:
 
 class Daemon:
     def __init__(self, cfg: Any, engine: EngineAPI, rules: Any, calendar: Any = None,
-                 patterns: Any = None, *, clock: Callable[[], float] = time.time,
+                 patterns: Any = None, *, scenes: Any = None, scenes_error: str | None = None,
+                 clock: Callable[[], float] = time.time,
                  hb_timeout_s: float = HB_TIMEOUT_S, hb_repeat_s: float = HB_REPEAT_S,
                  keepalive_s: float = 15) -> None:
         self.cfg, self.engine, self.rules, self.calendar, self.patterns = cfg, engine, rules, calendar, patterns
@@ -58,6 +59,7 @@ class Daemon:
         self.subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
         self.streams: set[asyncio.Task[Any]] = set()
         self.presets: dict[str, Any] = dict(getattr(patterns, "presets", None) or {})
+        self.scenes, self.scenes_error = scenes, scenes_error
 
 
     def schedule_meeting(self, n: Notification) -> dict[str, Any] | None:
@@ -303,6 +305,66 @@ def _routes(d: Daemon) -> web.RouteTableDef:
         out = {t: dataclasses.asdict(d.engine.set_light(t, **change)) for t in targets}
         return web.json_response({"bulbs": out})
 
+    def scene_store() -> Any:
+        if d.scenes is None:
+            raise web.HTTPServiceUnavailable(
+                text=json.dumps({"error": d.scenes_error or "scenes are not enabled"}),
+                content_type="application/json")
+        return d.scenes
+
+    @r.get("/v1/scenes")
+    async def scenes_list(req: web.Request) -> web.Response:
+        return web.json_response([s.to_json() for s in scene_store().scenes.values()])
+
+    @r.post("/v1/scenes")
+    async def scenes_save(req: web.Request) -> web.Response:
+        from .scenes import Scene, SceneError, change_of, norm_name, parse_scene
+        store = scene_store()
+        body = await _body(req)
+        roles = list(_d(d.engine.snapshot().get("bulbs")))
+        try:
+            if body.get("bulbs") is not None:
+                scene = parse_scene(body.get("name"), body["bulbs"])
+            else:
+                name = norm_name(body.get("name", ""))
+                bases = {r: s for r, s in (await d.engine.current_bases()).items() if r in roles}
+                if not bases:
+                    return _err(409, "no bulb state known yet; try again in a moment")
+                scene = Scene(name, {r: change_of(s) for r, s in bases.items()})
+        except SceneError as e:
+            return _err(400, str(e))
+        if unknown := [r for r in scene.bulbs if r not in roles]:
+            return _err(404, f"unknown bulb {unknown[0]!r}; known: {', '.join(roles) or 'none'}")
+        try:
+            replaced = store.put(scene)
+        except OSError as e:
+            return _err(500, f"could not write {store.path}: {e}")
+        d.publish({"type": "scenes", "change": "saved", "name": scene.name})
+        return web.json_response({"scene": scene.to_json(), "replaced": replaced})
+
+    @r.post("/v1/scenes/{name}/apply")
+    async def scenes_apply(req: web.Request) -> web.Response:
+        scene = scene_store().get(req.match_info["name"])
+        if scene is None:
+            return _err(404, f"unknown scene {req.match_info['name']!r}")
+        roles = set(_d(d.engine.snapshot().get("bulbs")))
+        out = {r: dataclasses.asdict(d.engine.set_light(r, **c)) for r, c in scene.bulbs.items() if r in roles}
+        return web.json_response({"scene": scene.name, "bulbs": out,
+                                  "skipped": [r for r in scene.bulbs if r not in roles]})
+
+    @r.delete("/v1/scenes/{name}")
+    async def scenes_delete(req: web.Request) -> web.Response:
+        store = scene_store()
+        scene = store.get(req.match_info["name"])
+        if scene is None:
+            return _err(404, f"unknown scene {req.match_info['name']!r}")
+        try:
+            store.delete(scene.name)
+        except OSError as e:
+            return _err(500, f"could not write {store.path}: {e}")
+        d.publish({"type": "scenes", "change": "deleted", "name": scene.name})
+        return web.json_response({"deleted": scene.name})
+
     @r.get("/v1/presets")
     async def presets(req: web.Request) -> web.Response:
         return web.json_response([p.to_json() for p in d.presets.values()])
@@ -382,7 +444,8 @@ async def _auth(req: web.Request, handler: Callable[[web.Request], Any]) -> web.
 
 
 def build_app(cfg: Any, engine: EngineAPI, rules: Any, calendar: Any = None, patterns: Any = None,
-              *, clock: Callable[[], float] = time.time, hb_timeout_s: float = HB_TIMEOUT_S,
+              *, scenes: Any = None, scenes_error: str | None = None,
+              clock: Callable[[], float] = time.time, hb_timeout_s: float = HB_TIMEOUT_S,
               hb_repeat_s: float = HB_REPEAT_S, hb_check_s: float = 5,
               keepalive_s: float = 15) -> web.Application:
     host, _ = split_listen(cfg.listen)
@@ -390,7 +453,8 @@ def build_app(cfg: Any, engine: EngineAPI, rules: Any, calendar: Any = None, pat
         if not is_loopback(host):
             raise ValueError(f"refusing to listen on non-loopback {cfg.listen} without a token")
         log.warning("no token configured; API is unauthenticated (loopback only)")
-    d = Daemon(cfg, engine, rules, calendar, patterns, clock=clock, hb_timeout_s=hb_timeout_s,
+    d = Daemon(cfg, engine, rules, calendar, patterns, scenes=scenes, scenes_error=scenes_error,
+               clock=clock, hb_timeout_s=hb_timeout_s,
                hb_repeat_s=hb_repeat_s, keepalive_s=keepalive_s)
     if calendar is not None and getattr(calendar, "publish", False) is None:
         calendar.publish = d.publish
@@ -419,6 +483,7 @@ async def serve(cfg: Any) -> None:
     from . import engine as engine_mod, patterns as patterns_mod, wiz
     from .calendar_ics import CalendarWatcher
     from .rules import Rules, config_handles, config_vip
+    from .scenes import SceneStore
 
     bulbs = await wiz.open_bulbs(cfg)
     pats = patterns_mod.load(cfg.patterns_file)
@@ -432,7 +497,13 @@ async def serve(cfg: Any) -> None:
         cfg.ics_urls,
         trigger=lambda s, k: engine.trigger(s, key=k, origin={"source": "calendar"}),
         set_mode=engine.set_mode, poll_s=cfg.calendar_poll_s, on_air_until_ack=until_ack)
-    app = build_app(cfg, engine, rules, calendar, pats)
+    scenes, scenes_error = None, None
+    try:
+        scenes = SceneStore(cfg.scenes_file)
+    except (OSError, ValueError) as e:  # a bad hand edit must not stop the daemon, nor be overwritten
+        scenes_error = f"{cfg.scenes_file} is invalid: {e}"
+        log.error("%s; scenes disabled until it is fixed", scenes_error)
+    app = build_app(cfg, engine, rules, calendar, pats, scenes=scenes, scenes_error=scenes_error)
     host, port = split_listen(cfg.listen)
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()

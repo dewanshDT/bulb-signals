@@ -32,6 +32,7 @@ class Config:
     quiet_max_bri: int = 10
     patterns_file: Path = PKG_DIR / "patterns_default.toml"
     rules_file: Path = PKG_DIR / "rules_default.toml"
+    scenes_file: Path = DEFAULT_PATH.parent / "scenes.toml"
     ics_urls: list[str] = field(default_factory=list)
     calendar_poll_s: int = 300
     raw: dict[str, Any] = field(default_factory=dict)
@@ -68,6 +69,7 @@ def load(path: str | os.PathLike | None = None) -> Config:
         quiet_max_bri=int(q.get("max_bri", 10)),
         patterns_file=_path(raw.get("patterns_file"), p.parent, PKG_DIR / "patterns_default.toml"),
         rules_file=_path(raw.get("rules_file"), p.parent, PKG_DIR / "rules_default.toml"),
+        scenes_file=_path(raw.get("scenes_file"), p.parent, p.parent / "scenes.toml"),
         ics_urls=list(cal.get("ics", [])),
         calendar_poll_s=int(cal.get("poll_s", 300)),
         raw=raw,

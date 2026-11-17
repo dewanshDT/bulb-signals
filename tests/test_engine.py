@@ -465,3 +465,18 @@ async def test_set_light_not_clamped_in_quiet_hours(bulbs):
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+async def test_current_bases(eng, bulbs, clock):
+    e, q = eng
+    assert await e.current_bases() == {"desk": BASE_DESK, "room": BASE_ROOM}
+    bulbs["desk"].state = LightState(on=True, dimming=20, rgb=(1, 2, 3))  # changed in the phone app
+    clock.t += 60
+    assert (await e.current_bases())["desk"].rgb == (1, 2, 3)
+    job = e.trigger("rep")
+    await until(q, lambda ev: ev["type"] == "signal_start" and ev["job"] == job)
+    clock.t += 60
+    reads = bulbs["desk"].reads
+    assert (await e.current_bases())["desk"].rgb == (1, 2, 3)  # not the signal's magenta
+    assert bulbs["desk"].reads == reads
+    e.ack()

@@ -187,6 +187,12 @@ class Engine:
             self._kick()
         return st
 
+    async def current_bases(self) -> dict[str, LightState]:
+        # mid-signal the bulbs show the signal, not their base
+        if self._playing is None:
+            await self._refresh(list(self.bulbs))
+        return dict(self._base)
+
     def snapshot(self) -> dict[str, Any]:
         j = self._playing
         return {

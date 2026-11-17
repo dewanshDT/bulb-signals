@@ -12,7 +12,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 from textual.widgets import OptionList, RichLog, Static
 
-from bulbsig.tui import BulbTUI, DaemonClient, LightScreen, SSEParser, match_preset
+from bulbsig.tui import BulbTUI, DaemonClient, LightScreen, SSEParser, look_matches, match_preset, match_scene
 
 TOKEN = "s3cret"
 SCREENSHOT = Path("/tmp/claude-960/-var-lib-storm-runtime-workspaces-scratch/"
@@ -73,6 +73,14 @@ class FakeDaemon:
          "scene": None, "speed": None, "bri": None},
     ]
 
+    scenes: list[dict[str, Any]] = [
+        {"name": "evening", "bulbs": {
+            "desk": {"on": True, "bri": 60, "color": "5a3cdc", "swatch": "#5a3cdc"},
+            "room": {"on": True, "bri": 35, "temp": 2700, "swatch": "#ffa757"}}},
+        {"name": "all off", "bulbs": {"desk": {"on": False, "swatch": "#2b2f36"},
+                                      "room": {"on": False, "swatch": "#2b2f36"}}},
+    ]
+
     def make_app(self) -> web.Application:
         @web.middleware
         async def auth(req: web.Request, handler):
@@ -120,6 +128,22 @@ class FakeDaemon:
             async def presets(_: web.Request) -> web.Response:
                 return web.json_response(self.presets)
             app.router.add_get("/v1/presets", presets)
+
+            async def scenes(_: web.Request) -> web.Response:
+                return web.json_response(self.scenes)
+
+            async def delete(req: web.Request) -> web.Response:
+                self.posts.append(("DELETE " + req.path, {}))
+                return web.json_response({"deleted": req.match_info["name"]})
+
+            async def bad(req: web.Request) -> web.Response:
+                return web.json_response({"error": "bad scene name '!!'"}, status=400)
+
+            app.router.add_get("/v1/scenes", scenes)
+            app.router.add_post("/v1/scenes", post)
+            app.router.add_post("/v1/scenes/{name}/apply", post)
+            app.router.add_delete("/v1/scenes/{name}", delete)
+            app.router.add_post("/v1/bad", bad)
         for p in ("notify", "signal", "ack", "mode", "mute", "heartbeat", "light"):
             app.router.add_post(f"/v1/{p}", post)
         return app
@@ -339,7 +363,7 @@ async def test_light_panel(daemon: FakeDaemon) -> None:
         await until(lambda: isinstance(app.screen, LightScreen))
         scr = app.screen
         assert scr.bri == 60
-        await pilot.press("down")
+        await pilot.press("down", "down", "down")
         await pilot.pause(0.3)
         assert lights(daemon) == []  # browsing does not apply
         await pilot.press("enter")
@@ -383,3 +407,62 @@ def test_match_preset() -> None:
     assert match_preset({"on": True, "temp": 3500}, presets) is None
     assert match_preset({"on": True, "rgb": [90, 60, 220]}, presets) == "violet"
     assert match_preset({"on": True, "scene": 5}, [{"name": "fire", "scene": 5, "bri": 60}]) is None
+
+
+async def test_scenes_in_light_panel(daemon: FakeDaemon) -> None:
+    app = make_tui(daemon)
+    async with app.run_test(size=(150, 42)) as pilot:
+        await connected(app, daemon)
+        await pilot.pause()
+        assert app.query_one("#bulbs", Static).border_subtitle == "scene: evening"
+        await pilot.press("l")
+        await until(lambda: isinstance(app.screen, LightScreen))
+        scr = app.screen
+        assert "scene evening" in str(scr.query_one("#light-head", Static).render())
+        await pilot.press("down", "enter")
+        await until(lambda: ("/v1/scenes/all off/apply", {}) in daemon.posts)
+        await pilot.press("s")
+        await pilot.pause()
+        assert scr.query_one("#light-name").value == "all off"
+        scr.query_one("#light-name").value = ""
+        for k in "late night":
+            await pilot.press("space" if k == " " else k)
+        await pilot.press("enter")
+        await until(lambda: ("/v1/scenes", {"name": "late night"}) in daemon.posts)
+        await pilot.press("x")
+        await pilot.pause()
+        assert not [p for p, _ in daemon.posts if p.startswith("DELETE")]  # first x only arms it
+        await pilot.press("x")
+        await until(lambda: ("DELETE /v1/scenes/all off", {}) in daemon.posts)
+        daemon.scenes = daemon.scenes[:1]
+        daemon.push("scenes", {"change": "deleted", "name": "all off"})
+        daemon.push("light", {"role": "desk", "state": {"on": True, "dimming": 60, "temp": 4000}})
+        await until(lambda: len(app.scenes) == 1)
+        await until(lambda: [o.id for o in scr.query_one("#light-presets", OptionList).options
+                             if o.id and o.id.startswith("scene:")] == ["scene:evening"])
+        await pilot.pause()
+        assert app.query_one("#bulbs", Static).border_subtitle == ""
+        await pilot.press("escape")
+        await until(lambda: not isinstance(app.screen, LightScreen))
+
+
+async def test_daemon_error_message_shown(daemon: FakeDaemon) -> None:
+    app = make_tui(daemon)
+    notes = []
+    app.notify = lambda msg, **kw: notes.append(msg)  # type: ignore[method-assign]
+    async with app.run_test(size=(150, 42)):
+        await connected(app, daemon)
+        app._send("/v1/bad", {}, "ok")
+        await until(lambda: notes)
+        assert notes == ["bad scene name '!!'"]
+
+
+def test_scene_matching() -> None:
+    assert look_matches({"on": False}, {"on": False, "temp": 2700})
+    assert look_matches({"color": "5A3CDC", "bri": 60}, {"on": True, "dimming": 60, "rgb": [90, 60, 220]})
+    assert not look_matches({"color": "5a3cdc", "bri": 50}, {"on": True, "dimming": 60, "rgb": [90, 60, 220]})
+    assert look_matches({"scene": "fireplace"}, {"on": True, "scene": 5})
+    assert look_matches({"temp": 2700}, {"on": True, "temp": 2740})
+    state = FakeDaemon().state
+    assert match_scene(state, FakeDaemon.scenes) == "evening"
+    assert match_scene(state, FakeDaemon.scenes[1:]) is None

@@ -8,6 +8,7 @@ COMMANDS = {
     "bulbs": ("bulbsig.wiz", "main", "control/inspect bulbs (discover, status, on, off, color, ...)"),
     "daemon": ("bulbsig.server", "main", "run the bulb daemon (engine + HTTP API + calendar)"),
     "preview": ("bulbsig.preview", "main", "play a signal on the real bulbs (direct, or via the daemon)"),
+    "scenes": ("bulbsig.scenes", "main", "list / apply / save / delete room scenes (via the daemon)"),
     "patterns": ("bulbsig.patterns", "main", "list / validate signal patterns"),
     "rules": ("bulbsig.rules", "main", "test which rule a notification would match"),
     "calendar": ("bulbsig.calendar_ics", "main", "show upcoming meetings from the ICS feeds"),

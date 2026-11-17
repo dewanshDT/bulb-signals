@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from math import log
 from typing import Any
+from urllib.parse import quote
 
 import aiohttp
 from rich.text import Text
@@ -23,6 +24,8 @@ from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import Footer, Input, OptionList, RichLog, Static
 from textual.widgets.option_list import Option
+
+from .contracts import SCENES
 
 FEED_MAX = 500
 
@@ -101,8 +104,14 @@ class DaemonClient:
                                      timeout=aiohttp.ClientTimeout(total=10)) as r:
             if r.status == 401:
                 raise AuthError()
-            r.raise_for_status()
             text = await r.text()
+            if r.status >= 400:
+                try:
+                    msg = json.loads(text).get("error")
+                except (ValueError, AttributeError):
+                    msg = None
+                raise aiohttp.ClientResponseError(r.request_info, r.history, status=r.status,
+                                                  message=str(msg or r.reason or ""))
             return json.loads(text) if text.strip() else {}
 
     async def get_state(self) -> dict[str, Any]:
@@ -113,17 +122,23 @@ class DaemonClient:
         d = await self._req("GET", "/v1/patterns")
         return [p for p in d if isinstance(p, dict)] if isinstance(d, list) else []
 
-    async def get_presets(self) -> list[dict[str, Any]]:
+    async def _list(self, path: str) -> list[dict[str, Any]]:
         try:
-            d = await self._req("GET", "/v1/presets")
+            d = await self._req("GET", path)
         except aiohttp.ClientResponseError as e:
-            if e.status == 404:  # daemon older than presets
+            if e.status in (404, 503):  # older daemon, or scenes.toml broken
                 return []
             raise
         return [p for p in d if isinstance(p, dict)] if isinstance(d, list) else []
 
-    async def post(self, path: str, body: dict[str, Any]) -> Any:
-        return await self._req("POST", path, body)
+    async def get_presets(self) -> list[dict[str, Any]]:
+        return await self._list("/v1/presets")
+
+    async def get_scenes(self) -> list[dict[str, Any]]:
+        return await self._list("/v1/scenes")
+
+    async def post(self, path: str, body: dict[str, Any], method: str = "POST") -> Any:
+        return await self._req(method, path, body if method == "POST" else None)
 
     async def events(self) -> AsyncIterator[tuple[str, dict[str, Any]]]:
         timeout = aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=self.read_timeout)
@@ -225,21 +240,51 @@ def match_preset(s: dict[str, Any], presets: list[dict[str, Any]]) -> str | None
     return None
 
 
+def look_matches(look: dict[str, Any], s: dict[str, Any]) -> bool:
+    """Whether a bulb state shows a scene's look for that bulb."""
+    if not look.get("on", True):
+        return not s.get("on")
+    if not s.get("on"):
+        return False
+    if look.get("bri") is not None and s.get("dimming") != look["bri"]:
+        return False
+    if look.get("color"):
+        return _describe(s) == "#" + str(look["color"]).lower()
+    if look.get("scene"):
+        return s.get("scene") == SCENES.get(str(look["scene"]), look["scene"])
+    if look.get("temp"):
+        return not s.get("rgb") and not s.get("scene") and s.get("temp") is not None \
+            and abs(float(s["temp"]) - float(look["temp"])) <= 50
+    return True
+
+
+def match_scene(state: dict[str, Any], scenes: list[dict[str, Any]]) -> str | None:
+    """The room scene every bulb currently shows, if any."""
+    bulbs = _d(state.get("bulbs"))
+    for sc in scenes:
+        looks = _d(sc.get("bulbs"))
+        if looks and all(r in bulbs and look_matches(_d(lk), _d(_d(bulbs[r]).get("state")))
+                         for r, lk in looks.items()):
+            return str(sc.get("name"))
+    return None
+
+
 TARGETS = ("desk", "room", "all")
+DELETE_CONFIRM_S = 3.0
 
 
 class LightScreen(ModalScreen[None]):
-    """Pick a bulb's resting colour. Enter applies; nothing changes while browsing."""
+    """Room scenes and resting colours. Enter applies; nothing changes while browsing."""
 
     CSS = f"""
     LightScreen {{ align: center middle; background: #000000 50%; }}
-    #light {{ width: 60; height: auto; max-height: 90%; background: {PANEL}; border: round {ACCENT};
+    #light {{ width: 64; height: auto; max-height: 95%; background: {PANEL}; border: round {ACCENT};
         border-title-color: {ACCENT}; border-title-style: bold; padding: 0 1; }}
     #light-head {{ height: auto; margin: 0 0 1 0; }}
-    #light-presets {{ height: auto; max-height: 20; background: {PANEL}; border: none; }}
+    #light-presets {{ height: auto; max-height: 24; background: {PANEL}; border: none; }}
     #light-presets > .option-list--option-highlighted {{ background: #253042; }}
-    #light-hex {{ display: none; background: {PANEL}; border: round {EDGE}; }}
-    #light-hex.shown {{ display: block; }}
+    .light-input {{ display: none; background: {PANEL}; border: round {EDGE}; }}
+    .light-input.shown {{ display: block; }}
     #light-help {{ color: {DIM}; height: auto; margin: 1 0 0 0; }}
     """
 
@@ -249,42 +294,64 @@ class LightScreen(ModalScreen[None]):
         Binding("right", "bri(10)", "Brighter"),
         Binding("t", "toggle", "On/off"),
         Binding("c", "custom", "Custom"),
+        Binding("s", "save_scene", "Save scene"),
+        Binding("x", "delete_scene", "Delete scene"),
         Binding("escape", "close", "Close"),
         Binding("l", "close", "Close", show=False),
     ]
 
     def __init__(self, presets: list[dict[str, Any]], state: dict[str, Any], target: str = "all",
-                 debounce_s: float = 0.2) -> None:
+                 debounce_s: float = 0.2, scenes: list[dict[str, Any]] | None = None) -> None:
         super().__init__()
         self.presets = presets
+        self.scenes = scenes or []
         self.state = state
         self.target = target
         self.debounce_s = debounce_s
         self.bri = self._target_bri()
         self._bri_timer: Any = None
+        self._delete_armed: tuple[str, float] | None = None
 
     def compose(self) -> ComposeResult:
         with Vertical(id="light"):
             yield Static(id="light-head")
             yield OptionList(id="light-presets")
-            yield Input(placeholder="rrggbb — enter to apply, esc to cancel", id="light-hex")
-            yield Static("enter apply · tab bulb · ←/→ bri · t on/off · c hex · esc close",
-                         id="light-help")
+            yield Input(placeholder="rrggbb — enter to apply, esc to cancel", id="light-hex",
+                        classes="light-input")
+            yield Input(placeholder="scene name — enter to save what the bulbs show now, esc to cancel",
+                        id="light-name", classes="light-input")
+            yield Static("enter apply · tab bulb · ←/→ bri · t on/off · c hex\n"
+                         "s save as scene · x delete scene · esc close", id="light-help")
 
     def on_mount(self) -> None:
         self.query_one("#light").border_title = "Light"
-        opts = []
+        self.render_options()
+        self.query_one("#light-presets", OptionList).focus()
+        self.render_head()
+
+    def render_options(self) -> None:
+        ol = self.query_one("#light-presets", OptionList)
+        keep = ol.get_option_at_index(ol.highlighted).id if ol.highlighted is not None and ol.option_count else None
+        opts = [Option(Text("Scenes · both bulbs", f"bold {ACCENT}"), disabled=True)]
+        for sc in self.scenes:
+            prompt = Text()
+            for role in sorted(_d(sc.get("bulbs"))):
+                prompt.append("█▌", _hex(_d(_d(sc["bulbs"]).get(role)).get("swatch")))
+            prompt.append(f" {sc.get('name') or '?'}", f"bold {FG}")
+            opts.append(Option(prompt, id=f"scene:{sc.get('name')}"))
+        if not self.scenes:
+            opts.append(Option(Text("  none yet — set the lights, then s", DIM), disabled=True))
+        opts.append(Option(Text("Colours · target bulb", f"bold {ACCENT}"), disabled=True))
         for p in self.presets:
             prompt = Text.assemble(("███ ", _hex(p.get("swatch"))), (str(p.get("name") or "?"), f"bold {FG}"))
             if p.get("description"):
                 prompt.append(f"  {p.get('description')}", DIM)
-            opts.append(Option(prompt, id=str(p.get("name"))))
-        ol = self.query_one("#light-presets", OptionList)
+            opts.append(Option(prompt, id=f"preset:{p.get('name')}"))
         ol.set_options(opts)
-        if opts:
-            ol.highlighted = 0
-        ol.focus()
-        self.render_head()
+        ids = [o.id for o in opts]
+        first = next((i for i, o in enumerate(opts) if not o.disabled), None)
+        idx = ids.index(keep) if keep is not None and keep in ids else first
+        ol.highlighted = idx
 
     def _roles(self) -> list[str]:
         bulbs = sorted(_d(self.state.get("bulbs")))
@@ -304,12 +371,19 @@ class LightScreen(ModalScreen[None]):
         self.state = state
         self.render_head()
 
+    def update_scenes(self, scenes: list[dict[str, Any]]) -> None:
+        self.scenes = scenes
+        self.render_options()
+        self.render_head()
+
     def render_head(self) -> None:
         t = Text()
         for name in TARGETS:
             t.append(f" {name} ", f"bold {BG} on {ACCENT}" if name == self.target else DIM)
             t.append(" ")
         t.append(f"   bri {self.bri}%", FG)
+        if sc := match_scene(self.state, self.scenes):
+            t.append(f"   scene {sc}", ACCENT)
         for r, s in zip(self._roles(), self._states()):
             t.append(f"\n{r:<5} ", f"bold {FG}")
             if not s:
@@ -325,11 +399,21 @@ class LightScreen(ModalScreen[None]):
     def _apply(self, body: dict[str, Any], ok: str) -> None:
         self.app._send("/v1/light", {"bulbs": self.target, **body}, f"{self.target}: {ok}")  # type: ignore[attr-defined]
 
+    def _highlighted_scene(self) -> str | None:
+        ol = self.query_one("#light-presets", OptionList)
+        if ol.highlighted is None or not ol.option_count:
+            return None
+        oid = ol.get_option_at_index(ol.highlighted).id or ""
+        return oid.removeprefix("scene:") if oid.startswith("scene:") else None
+
     @on(OptionList.OptionSelected, "#light-presets")
     def _picked(self, ev: OptionList.OptionSelected) -> None:
         ev.stop()
-        if ev.option.id:
-            self._apply({"preset": ev.option.id}, ev.option.id)
+        kind, _, name = (ev.option.id or "").partition(":")
+        if kind == "scene":
+            self.app._send(f"/v1/scenes/{quote(name)}/apply", {}, f"scene {name}")  # type: ignore[attr-defined]
+        elif kind == "preset":
+            self._apply({"preset": name}, name)
 
     def action_target(self) -> None:
         self.target = TARGETS[(TARGETS.index(self.target) + 1) % len(TARGETS)]
@@ -351,10 +435,35 @@ class LightScreen(ModalScreen[None]):
         on = not any(s.get("on") for s in self._states())
         self._apply({"on": on}, "on" if on else "off")
 
-    def action_custom(self) -> None:
-        inp = self.query_one("#light-hex", Input)
+    def _show_input(self, wid: str) -> None:
+        for inp in self.query(".light-input").results(Input):
+            inp.remove_class("shown")
+        inp = self.query_one(wid, Input)
         inp.add_class("shown")
         inp.focus()
+
+    def action_custom(self) -> None:
+        self._show_input("#light-hex")
+
+    def action_save_scene(self) -> None:
+        name = self._highlighted_scene()
+        self._show_input("#light-name")
+        inp = self.query_one("#light-name", Input)
+        if name and not inp.value:
+            inp.value = name  # enter overwrites the highlighted scene; type a new name for a new one
+
+    def action_delete_scene(self) -> None:
+        name = self._highlighted_scene()
+        if name is None:
+            self.app.notify("highlight a scene to delete it", timeout=2)
+            return
+        now = time.monotonic()
+        if self._delete_armed and self._delete_armed[0] == name and now - self._delete_armed[1] < DELETE_CONFIRM_S:
+            self._delete_armed = None
+            self.app._send(f"/v1/scenes/{quote(name)}", {}, f"deleted {name}", method="DELETE")  # type: ignore[attr-defined]
+        else:
+            self._delete_armed = (name, now)
+            self.app.notify(f"press x again to delete {name}", timeout=DELETE_CONFIRM_S)
 
     @on(Input.Submitted, "#light-hex")
     def _hex_submitted(self, ev: Input.Submitted) -> None:
@@ -364,24 +473,33 @@ class LightScreen(ModalScreen[None]):
             self.app.notify(f"not a colour: {ev.value!r}; want rrggbb", severity="error", timeout=3)
             return
         self._apply({"color": h.lower()}, f"#{h.lower()}")
-        self._hide_hex()
+        self._hide_inputs()
 
-    def _hide_hex(self) -> None:
-        inp = self.query_one("#light-hex", Input)
-        inp.value = ""
-        inp.remove_class("shown")
+    @on(Input.Submitted, "#light-name")
+    def _name_submitted(self, ev: Input.Submitted) -> None:
+        ev.stop()
+        name = " ".join(ev.value.split())
+        if not name:
+            return
+        self.app._send("/v1/scenes", {"name": name}, f"saved scene {name.lower()}")  # type: ignore[attr-defined]
+        self._hide_inputs()
+
+    def _hide_inputs(self) -> bool:
+        shown = False
+        for inp in self.query(".light-input").results(Input):
+            shown = shown or inp.has_class("shown")
+            inp.value = ""
+            inp.remove_class("shown")
         self.query_one("#light-presets", OptionList).focus()
+        return shown
 
     def action_close(self) -> None:
-        inp = self.query_one("#light-hex", Input)
-        if inp.has_class("shown"):
-            self._hide_hex()
+        if self._hide_inputs():
             return
         if self._bri_timer is not None:
             self._bri_timer.stop()
             self._send_bri()
         self.dismiss()
-
 
 def _describe(s: dict[str, Any]) -> str:
     if s.get("scene"):
@@ -451,6 +569,7 @@ class BulbTUI(App[int]):
         self.state: dict[str, Any] = {}
         self.patterns: list[dict[str, Any]] = []
         self.presets: list[dict[str, Any]] = []
+        self.scenes: list[dict[str, Any]] = []
         self.swatches: dict[str, str] = {}
         self.status = "connecting"
         self.status_detail = ""
@@ -488,11 +607,13 @@ class BulbTUI(App[int]):
     # ---- networking ----
 
     async def _load(self) -> None:
-        state, patterns, presets = await asyncio.gather(
-            self.client.get_state(), self.client.get_patterns(), self.client.get_presets())
+        state, patterns, presets, scenes = await asyncio.gather(
+            self.client.get_state(), self.client.get_patterns(), self.client.get_presets(),
+            self.client.get_scenes())
         self.state = state
         self.patterns = patterns
         self.presets = presets
+        self.scenes = scenes
         self.swatches = {str(p.get("name")): _hex(p.get("swatch")) for p in patterns}
         self._mute_step = 1 if self._muted() else 0
         self.feed.clear()
@@ -528,6 +649,15 @@ class BulbTUI(App[int]):
                 await asyncio.sleep(delay)
                 delay = min(self.backoff_max, delay * 2)
 
+    async def _reload_scenes(self) -> None:
+        try:
+            self.scenes = await self.client.get_scenes()
+        except Exception:
+            return
+        if isinstance(self.screen, LightScreen):
+            self.screen.update_scenes(self.scenes)
+        self.render_bulbs()
+
     async def _poll(self) -> None:
         if not self._connected:
             return
@@ -542,12 +672,15 @@ class BulbTUI(App[int]):
         except NoMatches:
             pass
 
-    def _send(self, path: str, body: dict[str, Any], ok: str) -> None:
+    def _send(self, path: str, body: dict[str, Any], ok: str, method: str = "POST") -> None:
         async def go() -> None:
             try:
-                res = await self.client.post(path, body)
+                res = await self.client.post(path, body, method)
             except AuthError:
                 self.set_status("auth", "auth failed — check token")
+                return
+            except aiohttp.ClientResponseError as e:
+                self.notify(e.message or f"{path} failed ({e.status})", severity="error")
                 return
             except Exception as e:
                 self.notify(f"{path} failed: {e}", severity="error")
@@ -610,6 +743,8 @@ class BulbTUI(App[int]):
             if b and isinstance(d.get("state"), dict):
                 b["state"] = d["state"]
             self.set_timer(1.5, self._poll)
+        elif etype == "scenes":
+            self.run_worker(self._reload_scenes(), group="scenes", exclusive=True)
         elif etype == "meeting":
             title = str(d.get("title") or "meeting")
             for m in _l(st.get("meetings")):
@@ -762,7 +897,10 @@ class BulbTUI(App[int]):
             dim = s.get("dimming")
             t.append(f"{dim}%" if isinstance(dim, (int, float)) and s.get("on") else "  ", FG)
             t.append(f"  {b.get('ip') or '—'}", DIM)
-        self.query_one("#bulbs", Static).update(t)
+        panel = self.query_one("#bulbs", Static)
+        panel.update(t)
+        sc = match_scene(self.state, self.scenes)
+        panel.border_subtitle = f"scene: {sc}" if sc else ""
 
     def render_meetings(self) -> None:
         t = Text()
@@ -872,7 +1010,7 @@ class BulbTUI(App[int]):
         if not self.presets and not _d(self.state.get("bulbs")):
             self.notify("no bulbs yet", timeout=2)
             return
-        self.push_screen(LightScreen(self.presets, self.state))
+        self.push_screen(LightScreen(self.presets, self.state, scenes=self.scenes))
 
     def action_refresh(self) -> None:
         if self.status == "auth":

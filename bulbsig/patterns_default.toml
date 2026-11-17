@@ -235,21 +235,21 @@ description = "Violet"
 color = "8a3cff"
 
 [preset.fireplace]
-description = "Fireplace scene"
+description = "Fireplace (animated)"
 scene = "fireplace"
 swatch = "ff6a00"
 
 [preset.cozy]
-description = "Cozy scene"
+description = "Cozy (animated)"
 scene = "cozy"
 swatch = "ffa040"
 
 [preset.focus]
-description = "Focus scene"
+description = "Focus (animated)"
 scene = "focus"
 swatch = "e6f0ff"
 
 [preset.nightlight]
-description = "Night light"
+description = "Night light (animated)"
 scene = "nightlight"
 swatch = "ff7a30"

@@ -50,6 +50,11 @@ class StubEngine:
         return {"playing": None, "queue": [], "modes": [], "muted_until": None, "quiet": False,
                 "bulbs": {"desk": {}, "room": {}}}
 
+    async def current_bases(self):
+        return dict(self.bases)
+
+    bases = {"desk": LightState(on=True, dimming=60, temp=2700), "room": LightState(on=False, dimming=20, rgb=(1, 2, 3))}
+
     def set_light(self, role, **change):
         self.calls.append(("light", (role, change)))
         return LightState(on=change.get("on", True), dimming=change.get("bri"), temp=change.get("temp"),
@@ -326,7 +331,7 @@ async def test_serve_lifecycle(monkeypatch, tmp_path):
     import aiohttp
 
     import bulbsig
-    from bulbsig import server
+    from bulbsig import scenes, server  # noqa: F401  scenes imports the real patterns before it is faked
 
     engine = StubEngine()
     restored = asyncio.Event()
@@ -355,6 +360,7 @@ async def test_serve_lifecycle(monkeypatch, tmp_path):
     ics.write_text("BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:x\nEND:VCALENDAR\n")
     c = cfg(listen=f"127.0.0.1:{port}")
     c.ics_urls = [str(ics)]
+    c.scenes_file = tmp_path / "scenes.toml"
     task = asyncio.create_task(server.serve(c))
     async with aiohttp.ClientSession() as http:
         for _ in range(100):
@@ -439,3 +445,80 @@ async def test_presets_route(env):
     r = await client.get("/v1/presets", headers=AUTH)
     names = [p["name"] for p in await r.json()]
     assert names == ["warm", "fire"]
+
+
+@pytest.fixture
+async def scene_env(rules, tmp_path):
+    from bulbsig.scenes import SceneStore
+    engine, store = StubEngine(), SceneStore(tmp_path / "scenes.toml")
+    app = build_app(cfg(), engine, rules, StubCal(), Pats(), scenes=store, clock=FakeClock())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    yield client, engine, store, app[DAEMON]
+    await client.close()
+
+
+async def test_scenes_crud(scene_env):
+    client, engine, store, d = scene_env
+    q = asyncio.Queue()
+    d.subscribers.add(q)
+    r = await client.get("/v1/scenes", headers=AUTH)
+    assert "evening" in [s["name"] for s in await r.json()]
+    st, body = await post(client, "/v1/scenes", {"name": "Late Night"})
+    assert st == 200 and body["replaced"] is False
+    saved = {r: {k: v for k, v in lk.items() if k != "swatch"} for r, lk in body["scene"]["bulbs"].items()}
+    assert saved == {"desk": {"on": True, "bri": 60, "temp": 2700}, "room": {"on": False, "bri": 20, "color": "010203"}}
+    assert (await q.get()) == {"type": "scenes", "change": "saved", "name": "late night"}
+    assert store.path.exists()
+    st, body = await post(client, "/v1/scenes", {"name": "late night", "bulbs": {"room": {"color": "ff0000"}}})
+    assert st == 200 and body["replaced"] is True
+    st, body = await post(client, "/v1/scenes/LATE%20NIGHT/apply")
+    assert st == 200 and body["skipped"] == []
+    assert lights(engine) == [("room", {"on": True, "rgb": (255, 0, 0)})]
+    st, body = await post(client, "/v1/scenes/movie/apply")
+    assert [r for r, _ in lights(engine)[-2:]] == ["desk", "room"]
+    r = await client.delete("/v1/scenes/late%20night", headers=AUTH)
+    assert r.status == 200 and "late night" not in store.scenes
+    r = await client.delete("/v1/scenes/late%20night", headers=AUTH)
+    assert r.status == 404
+
+
+@pytest.mark.parametrize("body,status", [
+    ({}, 400),
+    ({"name": "!!"}, 400),
+    ({"name": "x", "bulbs": {}}, 400),
+    ({"name": "x", "bulbs": {"desk": {"bri": 500}}}, 400),
+    ({"name": "x", "bulbs": {"hall": {"on": False}}}, 404),
+])
+async def test_scenes_save_rejects(scene_env, body, status):
+    client, *_ = scene_env
+    st, out = await post(client, "/v1/scenes", body)
+    assert st == status and "error" in out
+
+
+async def test_scenes_save_with_no_state(scene_env):
+    client, engine, *_ = scene_env
+    engine.bases = {}
+    st, out = await post(client, "/v1/scenes", {"name": "x"})
+    assert st == 409
+
+
+async def test_scenes_unknown_and_skipped(scene_env):
+    client, engine, store, _ = scene_env
+    st, _ = await post(client, "/v1/scenes/nope/apply")
+    assert st == 404
+    from bulbsig.scenes import Scene
+    store.put(Scene("hall", {"hall": {"on": False}, "desk": {"on": False}}))
+    st, out = await post(client, "/v1/scenes/hall/apply")
+    assert st == 200 and out["skipped"] == ["hall"] and list(out["bulbs"]) == ["desk"]
+
+
+async def test_scenes_disabled(rules):
+    app = build_app(cfg(), StubEngine(), rules, scenes=None, scenes_error="scenes.toml is invalid: x")
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        r = await client.get("/v1/scenes", headers=AUTH)
+        assert r.status == 503 and "invalid" in (await r.json())["error"]
+    finally:
+        await client.close()

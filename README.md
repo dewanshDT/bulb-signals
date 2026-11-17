@@ -61,11 +61,12 @@ yourself:
 ```sh
 bulbsig bulbs discover | status | on | off | color ff8800 | temp 2700 | scene fireplace   [-t desk|room|all]
 bulbsig daemon                     # engine + rules + calendar + HTTP API
-bulbsig tui                        # dashboard: space ack · p play · m mute · o ON AIR · f focus · l light · / filter
+bulbsig tui                        # dashboard: space ack · p play · m mute · o ON AIR · f focus · l light/scenes · / filter
 bulbsig preview dm mention         # play signals directly (daemon must be stopped) or --via-daemon
 bulbsig patterns list | validate
 bulbsig rules test --app com.tinyspeck.slackmacgap --title Alice --body "hi"
 bulbsig calendar --hours 24
+bulbsig scenes [apply|save|delete NAME]   # room scenes, via the daemon
 ```
 
 `bulbs on|off|toggle|bri|temp|color|scene` on a role or `all` go through the
@@ -86,10 +87,36 @@ every signal) without the WiZ or Google Home app:
 | `c` | type any `rrggbb` colour |
 | `esc` | close |
 
+The panel also lists **room scenes**: one look for both bulbs at once
+(`evening`, `focus`, `movie`, `cozy`, `all off` to start with).
+
+| key | does |
+|---|---|
+| `enter` on a scene | apply it to every bulb it names |
+| `s` | save what the bulbs rest at now as a scene (type a name; a highlighted scene's name is prefilled, so enter overwrites it) |
+| `x` `x` | delete the highlighted scene |
+
+A scene captures each bulb's resting colour, never a signal in progress or
+the ON AIR red. The Bulbs panel shows `scene: <name>` while the bulbs match
+one. Scenes live in `~/.config/bulbsig/scenes.toml` (or `scenes_file = "..."`
+in config), written on every save and safe to edit by hand:
+
+```toml
+[scene."movie"]
+desk = { on = false }
+room = { bri = 10, color = "1f4dff" }
+```
+
+Each bulb takes `on`, `bri`, and one of `color`, `temp` or `scene` (a WiZ
+animated scene, with optional `speed`). If the file has an error the daemon
+still starts, logs it, and leaves scenes off until it is fixed.
+
 Or over HTTP:
 
 ```sh
 curl -H "Authorization: Bearer $TOKEN" -d '{"bulbs":"desk","preset":"amber","bri":50}' http://127.0.0.1:8766/v1/light
+curl -H "Authorization: Bearer $TOKEN" -X POST http://127.0.0.1:8766/v1/scenes/movie/apply
+curl -H "Authorization: Bearer $TOKEN" -d '{"name":"late night"}' http://127.0.0.1:8766/v1/scenes   # save current
 curl -H "Authorization: Bearer $TOKEN" -d '{"bulbs":"all","temp":2700}' http://127.0.0.1:8766/v1/light
 ```
 

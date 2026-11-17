@@ -1,0 +1,22 @@
+# Starter room scenes, copied into ~/.config/bulbsig/scenes.toml on the first save or delete.
+# [scene."name"]  <role> = { on, bri, color = "rrggbb" | temp = K | scene = name, speed }
+
+[scene."evening"]
+desk = { bri = 60, temp = 2700 }
+room = { bri = 30, temp = 2200 }
+
+[scene."focus"]
+desk = { bri = 100, temp = 5000 }
+room = { bri = 60, temp = 4000 }
+
+[scene."movie"]
+desk = { on = false }
+room = { bri = 10, color = "1f4dff" }
+
+[scene."cozy"]
+desk = { bri = 40, scene = "cozy" }
+room = { bri = 30, scene = "fireplace" }
+
+[scene."all off"]
+desk = { on = false }
+room = { on = false }
